@@ -9,6 +9,7 @@ from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_admin, require_identity, require_user_tool, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import editable_file_task_service
+from services.image_task_service import image_task_service
 from services.log_service import LoggedCall
 from services.prompt_enhancement_service import (
     PromptEnhancementError,
@@ -121,9 +122,39 @@ def create_router() -> APIRouter:
         identity = require_admin(authorization)
         payload = body.model_dump(mode="python")
         payload["base_url"] = resolve_image_base_url(request)
-        call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
-        await filter_or_log(call, body.prompt)
-        return await call.run(openai_v1_image_generations.handle, payload)
+        tracked_identity = dict(identity)
+        task = await run_in_threadpool(
+            image_task_service.begin_api_call,
+            tracked_identity,
+            mode="generate",
+            endpoint="/v1/images/generations",
+            prompt=body.prompt,
+            model=body.model,
+            size=body.size,
+            quality=body.quality,
+            request_n=body.n,
+            response_format=body.response_format,
+        )
+        task_id = str(task["id"])
+        call = LoggedCall(
+            identity,
+            "/v1/images/generations",
+            body.model,
+            "文生图",
+            request_text=body.prompt,
+            success_callback=lambda result: image_task_service.complete_api_call(
+                tracked_identity, task_id, result
+            ),
+            error_callback=lambda error: image_task_service.fail_api_call(
+                tracked_identity, task_id, error
+            ),
+        )
+        try:
+            await filter_or_log(call, body.prompt)
+            return await call.run(openai_v1_image_generations.handle, payload)
+        except Exception as exc:
+            call.notify_failure(exc)
+            raise
 
     @router.post("/v1/images/edits")
     async def edit_images(
@@ -134,13 +165,43 @@ def create_router() -> APIRouter:
         payload, image_sources, mask_sources = await parse_image_edit_request(request)
         prompt = str(payload["prompt"])
         model = str(payload["model"])
-        call = LoggedCall(identity, "/v1/images/edits", model, "图生图", request_text=prompt)
-        await filter_or_log(call, prompt)
-        payload["images"] = await read_image_sources(image_sources)
-        if mask_sources:
-            payload["mask"] = await read_image_sources(mask_sources)
-        payload["base_url"] = resolve_image_base_url(request)
-        return await call.run(openai_v1_image_edit.handle, payload)
+        tracked_identity = dict(identity)
+        task = await run_in_threadpool(
+            image_task_service.begin_api_call,
+            tracked_identity,
+            mode="edit",
+            endpoint="/v1/images/edits",
+            prompt=prompt,
+            model=model,
+            size=payload.get("size"),
+            quality=str(payload.get("quality") or "auto"),
+            request_n=int(payload.get("n") or 1),
+            response_format=str(payload.get("response_format") or "b64_json"),
+        )
+        task_id = str(task["id"])
+        call = LoggedCall(
+            identity,
+            "/v1/images/edits",
+            model,
+            "图生图",
+            request_text=prompt,
+            success_callback=lambda result: image_task_service.complete_api_call(
+                tracked_identity, task_id, result
+            ),
+            error_callback=lambda error: image_task_service.fail_api_call(
+                tracked_identity, task_id, error
+            ),
+        )
+        try:
+            await filter_or_log(call, prompt)
+            payload["images"] = await read_image_sources(image_sources)
+            if mask_sources:
+                payload["mask"] = await read_image_sources(mask_sources)
+            payload["base_url"] = resolve_image_base_url(request)
+            return await call.run(openai_v1_image_edit.handle, payload)
+        except Exception as exc:
+            call.notify_failure(exc)
+            raise
 
     @router.post("/v1/chat/completions")
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):

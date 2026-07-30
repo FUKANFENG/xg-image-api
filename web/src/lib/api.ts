@@ -415,10 +415,23 @@ export type ImageResponse = {
   data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
 };
 
+export type ImageTaskImage = {
+  b64_json?: string;
+  url?: string;
+  revised_prompt?: string;
+  path?: string;
+  width?: number;
+  height?: number;
+  size_bytes?: number;
+  storage?: string;
+};
+
 export type ImageTask = {
   id: string;
   status: "queued" | "paused" | "running" | "success" | "error";
   mode: "generate" | "edit";
+  source?: "api" | "queue";
+  endpoint?: string;
   model?: ImageModel;
   size?: string;
   quality?: string;
@@ -426,7 +439,12 @@ export type ImageTask = {
   updated_at: string;
   prompt?: string;
   conversation_id?: string;
-  data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+  data?: ImageTaskImage[];
+  result_count?: number;
+  request_n?: number;
+  response_format?: string;
+  caller_key_id?: string;
+  caller_key_name?: string;
   error?: string;
   error_code?: string;
   progress?: string;
@@ -451,6 +469,29 @@ export type ImageTask = {
     operation_type?: string;
     conversation_id?: string;
     [key: string]: unknown;
+  };
+};
+
+export type ImageTaskOverviewSummary = {
+  total: number;
+  queued: number;
+  paused: number;
+  running: number;
+  success: number;
+  error: number;
+  api: number;
+  queue: number;
+};
+
+export type ImageTaskOverviewResponse = {
+  items: ImageTask[];
+  summary: ImageTaskOverviewSummary;
+  pagination: {
+    limit: number;
+    offset: number;
+    total: number;
+    has_more: boolean;
+    next_offset: number | null;
   };
 };
 
@@ -1243,6 +1284,28 @@ export async function updateImageTaskPriority(
 export async function fetchAdminImageQueue(limit = 300) {
   return httpRequest<{ items: ImageTask[] }>(
     `/api/image-tasks/admin/queue?limit=${limit}&_t=${Date.now()}`,
+  );
+}
+
+export async function fetchAdminImageTaskOverview(filters?: {
+  limit?: number;
+  offset?: number;
+  status?: string;
+  source?: string;
+  mode?: string;
+  query?: string;
+}) {
+  const params = new URLSearchParams({
+    limit: String(filters?.limit ?? 40),
+    offset: String(filters?.offset ?? 0),
+    _t: String(Date.now()),
+  });
+  if (filters?.status) params.set("status", filters.status);
+  if (filters?.source) params.set("source", filters.source);
+  if (filters?.mode) params.set("mode", filters.mode);
+  if (filters?.query) params.set("query", filters.query);
+  return httpRequest<ImageTaskOverviewResponse>(
+    `/api/image-tasks/admin/overview?${params.toString()}`,
   );
 }
 

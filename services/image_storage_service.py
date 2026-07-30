@@ -382,6 +382,10 @@ class ImageStorageService:
                     "recoverable": not local and remote,
                     "backed_up": local and remote,
                     "invalid_local": physical_local and not local,
+                    "size_bytes": int(record.get("size") or 0),
+                    "width": int(record.get("width") or 0),
+                    "height": int(record.get("height") or 0),
+                    "created_at": str(record.get("created_at") or ""),
                     "storage": (
                         "both"
                         if local and remote

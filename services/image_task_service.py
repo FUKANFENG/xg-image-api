@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
+from uuid import uuid4
 
 from services.account_service import account_service
 from services.auth_service import auth_service
@@ -17,6 +18,7 @@ from services.config import DATA_DIR, config
 from services.content_filter import request_text
 from services.creative_intelligence_service import creative_intelligence_service
 from services.creative_operations_service import creative_operations_service
+from services.image_storage_service import image_storage_service
 from services.image_task_store import ImageTaskStore
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
@@ -175,6 +177,74 @@ def _public_image_data(value: object) -> object:
     return public_items
 
 
+def _stored_image_path(value: object) -> str:
+    source = _clean(value)
+    if not source:
+        return ""
+    try:
+        path = urlsplit(source).path
+    except ValueError:
+        return ""
+    marker = "/images/"
+    if marker not in path:
+        return ""
+    return unquote(path.split(marker, 1)[1]).lstrip("/")
+
+
+def _tracked_image_data(value: object) -> list[dict[str, object]]:
+    """Keep task-safe result metadata without persisting large base64 payloads."""
+    if not isinstance(value, list):
+        return []
+    tracked: list[dict[str, object]] = []
+    relative_paths: list[str] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        url = _clean(raw.get("url"))
+        path = _stored_image_path(url)
+        item: dict[str, object] = {}
+        if url:
+            item["url"] = _portable_image_url(url)
+        if path:
+            item["path"] = path
+            relative_paths.append(path)
+        revised_prompt = _clean(raw.get("revised_prompt"))
+        if revised_prompt:
+            item["revised_prompt"] = revised_prompt
+        for key in ("width", "height", "size_bytes"):
+            numeric = _nonnegative_int(raw.get(key))
+            if numeric:
+                item[key] = numeric
+        storage = _clean(raw.get("storage"))
+        if storage:
+            item["storage"] = storage
+        if item:
+            tracked.append(item)
+    if not relative_paths:
+        return tracked
+    try:
+        metadata = {
+            _clean(item.get("path")): item
+            for item in image_storage_service.inspect_paths(relative_paths)
+            if isinstance(item, dict) and _clean(item.get("path"))
+        }
+    except Exception:
+        module_logger.exception("failed to resolve image metadata for task result")
+        return tracked
+    for item in tracked:
+        record = metadata.get(_clean(item.get("path")), {})
+        for source_key, target_key in (
+            ("size_bytes", "size_bytes"),
+            ("width", "width"),
+            ("height", "height"),
+            ("storage", "storage"),
+        ):
+            value = record.get(source_key)
+            if value not in (None, "", 0):
+                item[target_key] = value
+    return tracked
+
+
 def _task_created_timestamp(task: dict[str, Any]) -> float:
     created_ts = task.get("created_ts")
     if isinstance(created_ts, (int, float)) and not isinstance(created_ts, bool):
@@ -240,13 +310,33 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         "quality": task.get("quality"),
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
+        "source": _clean(task.get("source"), "queue"),
+        "endpoint": _clean(
+            task.get("endpoint"),
+            "/api/image-tasks/edits" if task.get("mode") == "edit" else "/api/image-tasks/generations",
+        ),
     }
+    if task.get("request_n") is not None:
+        item["request_n"] = _nonnegative_int(task.get("request_n"), maximum=4) or 1
+    if task.get("response_format"):
+        item["response_format"] = _clean(task.get("response_format"))
+    if task.get("caller_key_id"):
+        item["caller_key_id"] = _clean(task.get("caller_key_id"))
+    if task.get("caller_key_name"):
+        item["caller_key_name"] = _clean(task.get("caller_key_name"))
     if task.get("conversation_id"):
         item["conversation_id"] = task.get("conversation_id")
     if isinstance(task.get("workflow"), dict):
         item["workflow"] = dict(task["workflow"])
     if task.get("data") is not None:
         item["data"] = _public_image_data(task.get("data"))
+        item["result_count"] = (
+            _nonnegative_int(task.get("result_count"), maximum=100)
+            if task.get("result_count") is not None
+            else len(task.get("data"))
+            if isinstance(task.get("data"), list)
+            else 0
+        )
     if task.get("usage") is not None:
         item["usage"] = task.get("usage")
     if task.get("error"):
@@ -1398,10 +1488,253 @@ class ImageTaskService:
 
     def list_admin_tasks(self, limit: int = 300) -> list[dict[str, Any]]:
         with self._lock:
-            items = [self._public_task_locked(task) | {"owner_id": _clean(task.get("owner_id"))}
-                     for task in self._tasks.values()]
+            items = [
+                self._public_task_locked(task) | {"owner_id": _clean(task.get("owner_id"))}
+                for task in self._tasks.values()
+                if _clean(task.get("source"), "queue") == "queue"
+            ]
         items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         return items[: max(1, min(int(limit), 2000))]
+
+    def list_admin_task_page(
+        self,
+        *,
+        limit: int = 40,
+        offset: int = 0,
+        status: str = "",
+        source: str = "",
+        mode: str = "",
+        query: str = "",
+    ) -> dict[str, Any]:
+        page_limit = max(1, min(int(limit), 200))
+        page_offset = max(0, int(offset))
+        normalized_status = _clean(status).lower()
+        normalized_source = _clean(source).lower()
+        normalized_mode = _clean(mode).lower()
+        normalized_query = _clean(query).lower()
+        with self._lock:
+            changed = self._cleanup_locked()
+            if changed:
+                self._save_locked()
+            self._enrich_legacy_image_metadata_locked()
+            all_items = [
+                self._public_task_locked(task) | {"owner_id": _clean(task.get("owner_id"))}
+                for task in self._tasks.values()
+            ]
+        all_items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        summary = {
+            "total": len(all_items),
+            "queued": sum(item.get("status") == TASK_STATUS_QUEUED for item in all_items),
+            "paused": sum(item.get("status") == TASK_STATUS_PAUSED for item in all_items),
+            "running": sum(item.get("status") == TASK_STATUS_RUNNING for item in all_items),
+            "success": sum(item.get("status") == TASK_STATUS_SUCCESS for item in all_items),
+            "error": sum(item.get("status") == TASK_STATUS_ERROR for item in all_items),
+            "api": sum(item.get("source") == "api" for item in all_items),
+            "queue": sum(item.get("source") == "queue" for item in all_items),
+        }
+        items = [
+            item
+            for item in all_items
+            if (not normalized_status or _clean(item.get("status")).lower() == normalized_status)
+            and (not normalized_source or _clean(item.get("source")).lower() == normalized_source)
+            and (not normalized_mode or _clean(item.get("mode")).lower() == normalized_mode)
+            and (
+                not normalized_query
+                or normalized_query
+                in " ".join(
+                    _clean(item.get(key)).lower()
+                    for key in ("id", "prompt", "model", "endpoint", "caller_key_name", "owner_id")
+                )
+            )
+        ]
+        total = len(items)
+        page_items = items[page_offset:page_offset + page_limit]
+        return {
+            "items": page_items,
+            "summary": summary,
+            "pagination": {
+                "limit": page_limit,
+                "offset": page_offset,
+                "total": total,
+                "has_more": page_offset + len(page_items) < total,
+                "next_offset": page_offset + len(page_items)
+                if page_offset + len(page_items) < total
+                else None,
+            },
+        }
+
+    def _enrich_legacy_image_metadata_locked(self) -> None:
+        """Backfill pre-feature local image records once when the overview is used."""
+        for key, task in self._tasks.items():
+            data = task.get("data")
+            if not isinstance(data, list):
+                continue
+            needs_enrichment = any(
+                isinstance(item, dict)
+                and not _clean(item.get("path"))
+                and bool(_stored_image_path(item.get("url")))
+                for item in data
+            )
+            if not needs_enrichment:
+                continue
+            previous = list(data)
+            previous_result_count = task.get("result_count")
+            task["data"] = _tracked_image_data(data)
+            if task.get("result_count") is None:
+                task["result_count"] = len(
+                    [item for item in previous if isinstance(item, dict)]
+                )
+            try:
+                self.store.upsert(task)
+            except Exception:
+                task["data"] = previous
+                if previous_result_count is None:
+                    task.pop("result_count", None)
+                else:
+                    task["result_count"] = previous_result_count
+                module_logger.exception(
+                    "failed to persist legacy image metadata for task %s",
+                    key,
+                )
+
+    def begin_api_call(
+        self,
+        identity: dict[str, object],
+        *,
+        mode: str,
+        endpoint: str,
+        prompt: str,
+        model: str,
+        size: str | None,
+        quality: str,
+        request_n: int,
+        response_format: str,
+    ) -> dict[str, Any]:
+        owner = _owner_id(identity)
+        task_id = f"api-{uuid4().hex}"
+        key = _task_key(owner, task_id)
+        now = _now_iso()
+        now_ts = time.time()
+        task = {
+            "id": task_id,
+            "owner_id": owner,
+            "owner_role": _clean(identity.get("role"), "admin"),
+            "owner_name": _clean(identity.get("name")),
+            "owner_group": _clean(identity.get("group"), "default"),
+            "status": TASK_STATUS_RUNNING,
+            "mode": "edit" if mode == "edit" else "generate",
+            "source": "api",
+            "endpoint": _clean(endpoint),
+            "model": _clean(model, "gpt-image-2"),
+            "size": _clean(size),
+            "quality": _clean(quality, "auto"),
+            "prompt": _clean(prompt)[:10_000],
+            "request_n": max(1, min(4, int(request_n or 1))),
+            "response_format": _clean(response_format, "b64_json"),
+            "caller_key_id": _clean(identity.get("id")),
+            "caller_key_name": _clean(identity.get("name")) or _clean(identity.get("id")),
+            "created_at": now,
+            "updated_at": now,
+            "created_ts": now_ts,
+            "updated_ts": now_ts,
+            "started_ts": now_ts,
+            "priority": 0,
+            "resume_count": 0,
+            "progress": "starting_generation",
+            "last_checkpoint": "upstream_running",
+            "timeline": [
+                {
+                    "stage": "api_received",
+                    "status": TASK_STATUS_RUNNING,
+                    "created_at": now,
+                    "created_ts": now_ts,
+                    "detail": "已接收 OpenAI 兼容图片请求",
+                }
+            ],
+        }
+        with self._lock:
+            changed = self._cleanup_locked()
+            self._tasks[key] = task
+            try:
+                self.store.upsert(task)
+            except Exception:
+                self._tasks.pop(key, None)
+                raise
+            if changed:
+                self._save_locked()
+            return self._public_task_locked(task) | {"owner_id": owner}
+
+    def complete_api_call(
+        self,
+        identity: dict[str, object],
+        task_id: str,
+        result: object,
+    ) -> dict[str, Any]:
+        payload = result if isinstance(result, dict) else {}
+        raw_data = payload.get("data")
+        result_count = (
+            len([item for item in raw_data if isinstance(item, dict)])
+            if isinstance(raw_data, list)
+            else 0
+        )
+        data = _tracked_image_data(raw_data)
+        if not result_count:
+            return self.fail_api_call(
+                identity,
+                task_id,
+                RuntimeError(_clean(payload.get("message"), "上游未返回有效图片")),
+            )
+        owner = _owner_id(identity)
+        key = _task_key(owner, _clean(task_id))
+        with self._lock:
+            task = self._tasks.get(key)
+            if task is None:
+                raise ValueError("task not found")
+            if task.get("status") in TERMINAL_STATUSES:
+                return self._public_task_locked(task)
+            duration_ms = int(max(0.0, time.time() - _task_created_timestamp(task)) * 1_000)
+            usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else None
+            self._update_task(
+                key,
+                status=TASK_STATUS_SUCCESS,
+                data=data,
+                result_count=result_count,
+                usage=usage,
+                error="",
+                error_code="",
+                duration_ms=duration_ms,
+                progress="receiving_image",
+                last_checkpoint="completed",
+            )
+            return self._public_task_locked(self._tasks[key])
+
+    def fail_api_call(
+        self,
+        identity: dict[str, object],
+        task_id: str,
+        error: BaseException,
+    ) -> dict[str, Any]:
+        owner = _owner_id(identity)
+        key = _task_key(owner, _clean(task_id))
+        message = str(error) or "图片调用失败"
+        with self._lock:
+            task = self._tasks.get(key)
+            if task is None:
+                raise ValueError("task not found")
+            if task.get("status") in TERMINAL_STATUSES:
+                return self._public_task_locked(task)
+            duration_ms = int(max(0.0, time.time() - _task_created_timestamp(task)) * 1_000)
+            self._update_task(
+                key,
+                status=TASK_STATUS_ERROR,
+                data=[],
+                error=message,
+                error_code=_classify_image_error(error, message),
+                duration_ms=duration_ms,
+                progress="",
+                last_checkpoint="failed",
+            )
+            return self._public_task_locked(self._tasks[key])
 
     def _submit(
         self,
@@ -1477,6 +1810,8 @@ class ImageTaskService:
                 "project_budget_reserved": project_budget_reserved,
                 "status": TASK_STATUS_QUEUED,
                 "mode": mode,
+                "source": "queue",
+                "endpoint": "/api/image-tasks/edits" if mode == "edit" else "/api/image-tasks/generations",
                 "model": _clean(payload.get("model"), "gpt-image-2"),
                 "size": _clean(payload.get("size")),
                 "quality": _clean(payload.get("quality"), "auto"),
@@ -1597,6 +1932,8 @@ class ImageTaskService:
                 if account_email:
                     setattr(error, "account_email", account_email)
                 raise error
+            result_count = len(data)
+            data = _tracked_image_data(data)
             usage = result.get("usage")
             duration_ms = int((time.time() - started) * 1000)
             with self._lock:
@@ -1606,6 +1943,7 @@ class ImageTaskService:
                     key,
                     status=TASK_STATUS_SUCCESS,
                     data=data,
+                    result_count=result_count,
                     usage=usage,
                     error="",
                     duration_ms=duration_ms,
@@ -1854,6 +2192,13 @@ class ImageTaskService:
                 "owner_id": owner,
                 "status": status,
                 "mode": "edit" if item.get("mode") == "edit" else "generate",
+                "source": _clean(item.get("source"), "queue"),
+                "endpoint": _clean(
+                    item.get("endpoint"),
+                    "/api/image-tasks/edits"
+                    if item.get("mode") == "edit"
+                    else "/api/image-tasks/generations",
+                ),
                 "owner_role": _clean(item.get("owner_role"), "user"),
                 "owner_name": _clean(item.get("owner_name")),
                 "owner_group": _clean(item.get("owner_group"), "default"),
@@ -1872,6 +2217,16 @@ class ImageTaskService:
                 "resume_count": _nonnegative_int(item.get("resume_count")),
                 "last_checkpoint": _clean(item.get("last_checkpoint")),
             }
+            if item.get("request_n") is not None:
+                task["request_n"] = max(1, min(4, _nonnegative_int(item.get("request_n"), maximum=4) or 1))
+            if item.get("response_format"):
+                task["response_format"] = _clean(item.get("response_format"))
+            if item.get("caller_key_id"):
+                task["caller_key_id"] = _clean(item.get("caller_key_id"))
+            if item.get("caller_key_name"):
+                task["caller_key_name"] = _clean(item.get("caller_key_name"))
+            if item.get("result_count") is not None:
+                task["result_count"] = _nonnegative_int(item.get("result_count"), maximum=100)
             timeline = item.get("timeline")
             if isinstance(timeline, list):
                 task["timeline"] = [dict(entry) for entry in timeline[-100:] if isinstance(entry, dict)]

@@ -75,6 +75,29 @@ class FakeImageTaskService:
             "updated_at": "2026-01-01 00:00:00",
         }
 
+    def list_admin_task_page(self, **kwargs):
+        return {
+            "items": [
+                {
+                    "id": "api-task-1",
+                    "status": "success",
+                    "source": "api",
+                    "mode": "generate",
+                    "prompt": "cat",
+                    "created_at": "2026-01-01 00:00:00",
+                    "updated_at": "2026-01-01 00:00:01",
+                }
+            ],
+            "summary": {"total": 1, "api": 1, "queue": 0},
+            "pagination": {
+                "limit": kwargs["limit"],
+                "offset": kwargs["offset"],
+                "total": 1,
+                "has_more": False,
+                "next_offset": None,
+            },
+        }
+
     def retry_generation(self, identity, task_id, *, base_url):
         self.retry_calls.append((identity, task_id, base_url))
         return {
@@ -171,6 +194,25 @@ class ImageTasksApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertTrue(response.json()["accepting"])
         self.assertEqual(response.json()["estimated_total_secs"], 90)
+
+    def test_admin_overview_supports_filters_and_pagination(self):
+        response = self.client.get(
+            "/api/image-tasks/admin/overview",
+            headers=AUTH_HEADERS,
+            params={
+                "limit": 20,
+                "offset": 0,
+                "status": "success",
+                "source": "api",
+                "mode": "generate",
+                "query": "cat",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["items"][0]["id"], "api-task-1")
+        self.assertEqual(payload["pagination"]["limit"], 20)
 
     def test_retry_generation_task(self):
         response = self.client.post("/api/image-tasks/failed-task/retry", headers=AUTH_HEADERS)

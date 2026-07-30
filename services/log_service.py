@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import itertools
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ from utils.helper import anthropic_sse_stream, sse_json_stream
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
 INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id"}
+module_logger = logging.getLogger(__name__)
 
 
 class LogService:
@@ -246,6 +248,31 @@ class LoggedCall:
     started: float = field(default_factory=time.time)
     request_text: str = ""
     request_shape: dict[str, int] | None = None
+    success_callback: Callable[[object], None] | None = None
+    error_callback: Callable[[BaseException], None] | None = None
+    _callback_finished: bool = field(default=False, init=False, repr=False)
+
+    def _notify_success(self, result: object) -> None:
+        if self._callback_finished:
+            return
+        self._callback_finished = True
+        if self.success_callback is None:
+            return
+        try:
+            self.success_callback(result)
+        except Exception:
+            module_logger.exception("image call success callback failed")
+
+    def notify_failure(self, error: BaseException) -> None:
+        if self._callback_finished:
+            return
+        self._callback_finished = True
+        if self.error_callback is None:
+            return
+        try:
+            self.error_callback(error)
+        except Exception:
+            module_logger.exception("image call error callback failed")
 
     async def run(self, handler, *args, sse: str = "openai"):
         from services.protocol.conversation import ImageGenerationError
@@ -253,19 +280,23 @@ class LoggedCall:
         try:
             result = await run_in_threadpool(handler, *args)
         except ImageGenerationError as exc:
+            self.notify_failure(exc)
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""))
             return _image_error_response(exc)
         except HTTPException as exc:
+            self.notify_failure(exc)
             self.log("调用失败", status="failed", error=str(exc.detail))
             raise
         except Exception as exc:
+            self.notify_failure(exc)
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
 
         if isinstance(result, dict):
+            self._notify_success(result)
             self.log("调用完成", result)
             response = dict(result)
             response.pop("_account_email", None)
@@ -275,18 +306,22 @@ class LoggedCall:
         try:
             has_first, first = await run_in_threadpool(_next_item, result)
         except ImageGenerationError as exc:
+            self.notify_failure(exc)
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""))
             return _image_error_response(exc)
         except HTTPException as exc:
+            self.notify_failure(exc)
             self.log("调用失败", status="failed", error=str(exc.detail))
             raise
         except Exception as exc:
+            self.notify_failure(exc)
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
         if not has_first:
+            self._notify_success({"data": []})
             self.log("流式调用结束")
             return StreamingResponse(sender(()), media_type="text/event-stream")
         return StreamingResponse(sender(self.stream(itertools.chain([first], result))), media_type="text/event-stream")
@@ -304,6 +339,7 @@ class LoggedCall:
                 yield _strip_internal_response_fields(item)
         except Exception as exc:
             failed = True
+            self.notify_failure(exc)
             self.log(
                 "流式调用失败",
                 status="failed",
@@ -319,6 +355,7 @@ class LoggedCall:
             raise
         finally:
             if not failed:
+                self._notify_success({"data": [{"url": url} for url in list(dict.fromkeys(urls))]})
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
                          conversation_id=conversation_ids[0] if conversation_ids else "")
 

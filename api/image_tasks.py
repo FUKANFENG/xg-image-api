@@ -570,6 +570,27 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         return {"items": await run_in_threadpool(image_task_service.list_admin_tasks, limit)}
 
+    @router.get("/api/image-tasks/admin/overview")
+    async def list_admin_image_task_overview(
+        limit: int = Query(default=40, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        status: str = Query(default="", max_length=20),
+        source: str = Query(default="", max_length=20),
+        mode: str = Query(default="", max_length=20),
+        query: str = Query(default="", max_length=200),
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        return await run_in_threadpool(
+            image_task_service.list_admin_task_page,
+            limit=limit,
+            offset=offset,
+            status=status,
+            source=source,
+            mode=mode,
+            query=query,
+        )
+
     @router.delete("/api/image-tasks/{task_id}")
     async def delete_failed_image_task(
         task_id: str,

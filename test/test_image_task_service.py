@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import services.image_task_service as image_task_module
 from services.account_service import account_service
 from services.image_task_service import ImageTaskService
 from services.openai_backend_api import ImageTaskCancelledError, OpenAIBackendAPI
@@ -71,6 +72,176 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(page["total"], 3)
             self.assertTrue(page["has_more"])
             self.assertEqual(page["next_offset"], 2)
+
+    def test_standard_api_call_is_persisted_with_safe_image_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "image_tasks.json"
+            service = self.make_service(path)
+            started = service.begin_api_call(
+                OWNER,
+                mode="generate",
+                endpoint="/v1/images/generations",
+                prompt="cinematic cat",
+                model="gpt-image-2",
+                size="1024x1536",
+                quality="high",
+                request_n=1,
+                response_format="b64_json",
+            )
+
+            with patch.object(
+                image_task_module.image_storage_service,
+                "inspect_paths",
+                return_value=[
+                    {
+                        "path": "2026/07/30/result.png",
+                        "size_bytes": 123456,
+                        "width": 1024,
+                        "height": 1536,
+                        "storage": "local",
+                    }
+                ],
+            ):
+                completed = service.complete_api_call(
+                    OWNER,
+                    started["id"],
+                    {
+                        "data": [
+                            {
+                                "b64_json": "large-payload-must-not-be-persisted",
+                                "url": "http://127.0.0.1:18080/images/2026/07/30/result.png",
+                                "revised_prompt": "cinematic orange cat",
+                            }
+                        ],
+                        "usage": {"total_tokens": 42},
+                    },
+                )
+
+            self.assertEqual(completed["status"], "success")
+            self.assertEqual(completed["source"], "api")
+            self.assertEqual(completed["endpoint"], "/v1/images/generations")
+            self.assertEqual(completed["caller_key_name"], "Owner")
+            self.assertEqual(completed["data"][0]["url"], "/images/2026/07/30/result.png")
+            self.assertEqual(completed["data"][0]["width"], 1024)
+            self.assertEqual(completed["data"][0]["height"], 1536)
+            self.assertEqual(completed["data"][0]["size_bytes"], 123456)
+            self.assertNotIn("b64_json", completed["data"][0])
+
+            page = service.list_admin_task_page(
+                status="success",
+                source="api",
+                mode="generate",
+                query="cinematic",
+            )
+            self.assertEqual(page["pagination"]["total"], 1)
+            self.assertEqual(page["summary"]["api"], 1)
+            self.assertEqual(page["items"][0]["id"], started["id"])
+
+            reloaded = self.make_service(path)
+            persisted = reloaded.list_admin_task_page(source="api")["items"][0]
+            self.assertEqual(persisted["caller_key_name"], "Owner")
+            self.assertEqual(persisted["data"][0]["size_bytes"], 123456)
+
+    def test_base64_api_success_is_counted_without_persisting_payload(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json")
+            started = service.begin_api_call(
+                OWNER,
+                mode="generate",
+                endpoint="/v1/images/generations",
+                prompt="cinematic cat",
+                model="gpt-image-2",
+                size="1024x1024",
+                quality="auto",
+                request_n=1,
+                response_format="b64_json",
+            )
+
+            completed = service.complete_api_call(
+                OWNER,
+                started["id"],
+                {"data": [{"b64_json": "large-payload-must-not-be-persisted"}]},
+            )
+
+            self.assertEqual(completed["status"], "success")
+            self.assertEqual(completed["result_count"], 1)
+            self.assertEqual(completed["data"], [])
+            persisted_payload = service.store.load_all()[0]
+            self.assertNotIn(
+                "large-payload-must-not-be-persisted",
+                str(persisted_payload),
+            )
+
+    def test_overview_backfills_metadata_for_legacy_local_results(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json")
+            started = service.begin_api_call(
+                OWNER,
+                mode="generate",
+                endpoint="/v1/images/generations",
+                prompt="legacy result",
+                model="gpt-image-2",
+                size="1024x1024",
+                quality="auto",
+                request_n=1,
+                response_format="url",
+            )
+            key = f"{OWNER['id']}:{started['id']}"
+            service._tasks[key]["status"] = "success"
+            service._tasks[key]["data"] = [
+                {"url": "/images/2026/07/29/legacy.png"}
+            ]
+            service.store.upsert(service._tasks[key])
+
+            with patch.object(
+                image_task_module.image_storage_service,
+                "inspect_paths",
+                return_value=[
+                    {
+                        "path": "2026/07/29/legacy.png",
+                        "size_bytes": 654321,
+                        "width": 1536,
+                        "height": 1024,
+                        "storage": "local",
+                    }
+                ],
+            ):
+                item = service.list_admin_task_page()["items"][0]
+
+            self.assertEqual(item["data"][0]["path"], "2026/07/29/legacy.png")
+            self.assertEqual(item["data"][0]["width"], 1536)
+            self.assertEqual(item["data"][0]["height"], 1024)
+            self.assertEqual(item["data"][0]["size_bytes"], 654321)
+            self.assertEqual(item["result_count"], 1)
+
+    def test_standard_api_failure_is_visible_in_unified_feed(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json")
+            started = service.begin_api_call(
+                OWNER,
+                mode="edit",
+                endpoint="/v1/images/edits",
+                prompt="make it blue",
+                model="gpt-image-2",
+                size=None,
+                quality="auto",
+                request_n=1,
+                response_format="url",
+            )
+
+            failed = service.fail_api_call(
+                OWNER,
+                started["id"],
+                RuntimeError("upstream connection failed"),
+            )
+
+            self.assertEqual(failed["status"], "error")
+            self.assertEqual(failed["source"], "api")
+            self.assertEqual(failed["error_code"], "upstream_connection_error")
+            self.assertEqual(
+                service.list_admin_task_page(status="error")["pagination"]["total"],
+                1,
+            )
 
     def test_duplicate_submit_uses_existing_task(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
