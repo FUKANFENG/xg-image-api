@@ -25,17 +25,31 @@
 
 ### Docker 运行
 
-```bash
-git clone git@github.com:basketikun/chatgpt2api.git
-cd chatgpt2api
-docker compose up -d
+```powershell
+git clone https://github.com/FUKANFENG/xg-image-api.git
+Set-Location xg-image-api
+Copy-Item .env.example .env
+.\scripts\start.ps1 -Build
 ```
 
-启动前请先在 `config.json` 中设置 `auth-key`，也可以在 `docker-compose.yml` 中通过 `CHATGPT2API_AUTH_KEY` 覆盖。
+启动前请在 `.env` 中设置 `CHATGPT2API_AUTH_KEY`。启动脚本默认从不常用的 `18080` 端口开始检测；若端口已被占用，会自动选择后续空闲端口并打印实际地址，不会停止或修改原有服务。重复运行时会优先复用本项目当前端口。
 
-- Web 面板：`http://localhost:3000`
-- API 地址：`http://localhost:3000/v1`
+- Web 面板：默认 `http://127.0.0.1:18080`，以启动脚本输出为准
+- API 地址：默认 `http://127.0.0.1:18080/v1`，以启动脚本输出为准
 - 数据目录：`./data`
+
+如需指定起始端口：
+
+```powershell
+.\scripts\start.ps1 -Port 19000
+```
+
+如需直接运行 Docker Compose，可通过 `XG_HOST_PORT` 固定端口；直接运行 Compose 不具备自动换端口能力：
+
+```powershell
+$env:XG_HOST_PORT = "19000"
+docker compose up -d
+```
 
 ### WARP / FlareSolverr 稳定代理部署
 
@@ -178,7 +192,7 @@ Authorization: Bearer <auth-key>
 返回当前暴露的图片模型列表。
 
 ```bash
-curl http://localhost:8000/v1/models \
+curl http://localhost:18080/v1/models \
   -H "Authorization: Bearer <auth-key>"
 ```
 
@@ -202,7 +216,7 @@ curl http://localhost:8000/v1/models \
 OpenAI 兼容图片生成接口，用于文生图。
 
 ```bash
-curl http://localhost:8000/v1/images/generations \
+curl http://localhost:18080/v1/images/generations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -d '{
@@ -235,7 +249,7 @@ curl http://localhost:8000/v1/images/generations \
 OpenAI 兼容图片编辑接口，可上传图片文件，也可按官方 JSON 格式传入图片链接并生成编辑结果。
 
 ```bash
-curl http://localhost:8000/v1/images/edits \
+curl http://localhost:18080/v1/images/edits \
   -H "Authorization: Bearer <auth-key>" \
   -F "model=gpt-image-2" \
   -F "prompt=把这张图改成赛博朋克夜景风格" \
@@ -246,7 +260,7 @@ curl http://localhost:8000/v1/images/edits \
 也可以直接传图片 URL：
 
 ```bash
-curl http://localhost:8000/v1/images/edits \
+curl http://localhost:18080/v1/images/edits \
   -H "Authorization: Bearer <auth-key>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -282,7 +296,7 @@ curl http://localhost:8000/v1/images/edits \
 面向文本、网页搜索与图片场景的 Chat Completions 兼容接口，不是完整通用聊天代理。
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:18080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -d '{
@@ -321,7 +335,7 @@ curl http://localhost:8000/v1/chat/completions \
 面向文本、网页搜索和图片生成工具调用的 Responses API 兼容接口，不是完整通用 Responses API 代理。
 
 ```bash
-curl http://localhost:8000/v1/responses \
+curl http://localhost:18080/v1/responses \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -d '{

@@ -4,14 +4,14 @@
 
 需要确保图片调用只走 ChatGPT Web、不消耗 Codex 生图额度，或需要文字对话、看图对话、参考图编辑、Mask、多图、Responses 和 SSE 的完整示例，请阅读 [`WEB_API_REFERENCE.md`](./WEB_API_REFERENCE.md)。Swagger、Postman 等工具可导入 [`openapi-web-api.yaml`](./openapi-web-api.yaml)。
 
-本机网页默认无需登录，访问 `http://127.0.0.1:8000` 会直接进入控制台。免登录只对启用了 `CHATGPT2API_WEB_NO_LOGIN` 的 loopback 同源浏览器请求生效；下列工作流 API 始终继续使用 Bearer API Key。
+本机网页默认无需登录。推荐用 `.\scripts\start.ps1` 启动：无冲突时访问 `http://127.0.0.1:18080`，若端口被占用则使用脚本打印的实际地址。免登录只对启用了 `CHATGPT2API_WEB_NO_LOGIN` 的 loopback 同源浏览器请求生效；下列工作流 API 始终继续使用 Bearer API Key。
 
 ## 最小接入
 
 准备两个环境变量：
 
 ```powershell
-$env:XG_API_BASE_URL = "http://127.0.0.1:8000"
+$env:XG_API_BASE_URL = "http://127.0.0.1:18080"
 $env:XG_API_KEY = "<在设置页查看的 API Key>"
 ```
 
@@ -23,7 +23,7 @@ import os
 from sdk import XGAPIClient
 
 client = XGAPIClient(
-    base_url=os.getenv("XG_API_BASE_URL", "http://127.0.0.1:8000"),
+    base_url=os.getenv("XG_API_BASE_URL", "http://127.0.0.1:18080"),
     api_key=os.environ["XG_API_KEY"],
 )
 
@@ -57,7 +57,7 @@ python examples/workflow_image.py
 Authorization: Bearer <API_KEY>
 ```
 
-Base URL 既可以传服务根地址 `http://127.0.0.1:8000`，也可以传 OpenAI 风格的 `http://127.0.0.1:8000/v1`；附带客户端会自动归一化。
+Base URL 既可以传服务根地址 `http://127.0.0.1:18080`，也可以传 OpenAI 风格的 `http://127.0.0.1:18080/v1`；附带客户端会自动归一化。端口自动切换时，以启动脚本打印的地址为准。
 
 ## Python 客户端方法
 
@@ -81,7 +81,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key=os.environ["XG_API_KEY"],
-    base_url=os.getenv("XG_API_BASE_URL", "http://127.0.0.1:8000") + "/v1",
+    base_url=os.getenv("XG_API_BASE_URL", "http://127.0.0.1:18080") + "/v1",
 )
 
 result = client.images.generate(

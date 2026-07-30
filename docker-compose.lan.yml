@@ -1,6 +1,6 @@
 services:
   app:
     ports: !override
-      - "${CHATGPT2API_LAN_BIND_ADDRESS:-0.0.0.0}:3000:80"
+      - "${CHATGPT2API_LAN_BIND_ADDRESS:-0.0.0.0}:${XG_HOST_PORT:-18080}:80"
     environment:
       CHATGPT2API_BASE_URL: "${CHATGPT2API_LAN_BASE_URL:?set CHATGPT2API_LAN_BASE_URL before starting LAN mode}"

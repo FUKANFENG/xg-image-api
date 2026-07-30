@@ -45,10 +45,10 @@ pro-codex-gpt-image-2
 仓库自带 `docker-compose.yml` 的本机默认服务地址：
 
 ```text
-http://127.0.0.1:3000
+http://127.0.0.1:18080
 ```
 
-如果部署时把容器端口映射到了 `8001` 或其他端口，请把全文示例中的 Base URL 替换为实际地址；接口路径不变。
+推荐使用 `.\scripts\start.ps1` 启动。若 `18080` 已被占用，脚本会在不影响原有服务的前提下自动选择后续空闲端口并打印实际地址；请把全文示例中的 Base URL 替换为该地址，接口路径不变。
 
 所有 `/v1/*` 接口都需要本项目的 API Key：
 
@@ -61,7 +61,7 @@ Authorization: Bearer <XG_API_KEY>
 PowerShell 环境变量示例：
 
 ```powershell
-$env:XG_API_BASE_URL = "http://127.0.0.1:3000"
+$env:XG_API_BASE_URL = "http://127.0.0.1:18080"
 $env:XG_API_KEY = "<你的本地 API Key>"
 ```
 
@@ -98,7 +98,7 @@ Python：
 ```python
 import requests
 
-base_url = "http://127.0.0.1:3000"
+base_url = "http://127.0.0.1:18080"
 response = requests.get(f"{base_url}/health?format=json", timeout=10)
 response.raise_for_status()
 print(response.json())
@@ -110,7 +110,7 @@ print(response.json())
 import os
 import requests
 
-base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:3000")
+base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:18080")
 api_key = os.environ["XG_API_KEY"]
 
 response = requests.get(
@@ -160,7 +160,7 @@ Python：
 import os
 import requests
 
-base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:3000")
+base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:18080")
 api_key = os.environ["XG_API_KEY"]
 
 response = requests.post(
@@ -302,7 +302,7 @@ from pathlib import Path
 
 import requests
 
-base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:3000")
+base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:18080")
 api_key = os.environ["XG_API_KEY"]
 image_path = Path("reference.png")
 mime = mimetypes.guess_type(image_path.name)[0] or "image/png"
@@ -375,7 +375,7 @@ import os
 
 import requests
 
-base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:3000")
+base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:18080")
 api_key = os.environ["XG_API_KEY"]
 
 with requests.post(
@@ -559,7 +559,7 @@ from pathlib import Path
 
 import requests
 
-base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:3000")
+base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:18080")
 api_key = os.environ["XG_API_KEY"]
 
 response = requests.post(
@@ -592,7 +592,7 @@ for index, item in enumerate(result.get("data", []), start=1):
   "data": [
     {
       "b64_json": "<BASE64>",
-      "url": "http://127.0.0.1:3000/images/...",
+      "url": "http://127.0.0.1:18080/images/...",
       "revised_prompt": "..."
     }
   ],
@@ -642,7 +642,7 @@ for index, item in enumerate(result.get("data", []), start=1):
   "data": [
     {
       "b64_json": "<BASE64>",
-      "url": "http://127.0.0.1:3000/images/..."
+      "url": "http://127.0.0.1:18080/images/..."
     }
   ]
 }
@@ -676,7 +676,7 @@ gpt-image-2
 ### 10.1 multipart 文件上传
 
 ```powershell
-curl.exe -X POST "http://127.0.0.1:3000/v1/images/edits" `
+curl.exe -X POST "http://127.0.0.1:18080/v1/images/edits" `
   -H "Authorization: Bearer $env:XG_API_KEY" `
   -F "model=gpt-image-2" `
   -F "prompt=保留人物和构图，把背景改成下雪的东京街头，电影感灯光" `
@@ -693,7 +693,7 @@ import os
 
 import requests
 
-base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:3000")
+base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:18080")
 api_key = os.environ["XG_API_KEY"]
 
 with open("reference.png", "rb") as image_file:
@@ -725,7 +725,7 @@ import os
 
 import requests
 
-base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:3000")
+base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:18080")
 api_key = os.environ["XG_API_KEY"]
 
 with open("person.png", "rb") as person, open("style.jpg", "rb") as style:
@@ -964,7 +964,7 @@ python -m pip install openai
 import os
 from openai import OpenAI
 
-base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:3000")
+base_url = os.getenv("XG_API_BASE_URL", "http://127.0.0.1:18080")
 
 client = OpenAI(
     api_key=os.environ["XG_API_KEY"],
@@ -1009,7 +1009,7 @@ import os
 from sdk import XGAPIClient
 
 client = XGAPIClient(
-    base_url=os.getenv("XG_API_BASE_URL", "http://127.0.0.1:3000"),
+    base_url=os.getenv("XG_API_BASE_URL", "http://127.0.0.1:18080"),
     api_key=os.environ["XG_API_KEY"],
 )
 
