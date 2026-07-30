@@ -1,0 +1,626 @@
+openapi: 3.1.0
+info:
+  title: XG生图 Web 模式 API
+  version: 1.8.0
+  description: |
+    面向工作流集成的 ChatGPT Web 兼容 API。
+
+    图片调用请始终使用 `gpt-image-2`。不要使用
+    `codex-gpt-image-2` 或任何带套餐前缀的 Codex 图片模型。
+servers:
+  - url: http://127.0.0.1:3000
+    description: 本机服务
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: 健康检查
+      security: []
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum:
+              - json
+      responses:
+        "200":
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /v1/models:
+    get:
+      operationId: listModels
+      summary: 获取可用模型
+      responses:
+        "200":
+          description: 模型列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/chat/completions:
+    post:
+      operationId: createChatCompletion
+      summary: ChatGPT Web 文字或看图对话
+      description: |
+        使用 `auto` 或文字模型时执行文字/看图对话。
+        使用 `gpt-image-2` 时会转为图片生成，图片以 Markdown Data URL
+        写入 assistant message；业务图片编辑优先使用 `/v1/images/edits`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+      responses:
+        "200":
+          description: |
+            非流式时返回 JSON；`stream=true` 时返回
+            `text/event-stream`，以 `data: [DONE]` 结束。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletion"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+  /v1/responses:
+    post:
+      operationId: createResponse
+      summary: ChatGPT Web Responses 兼容调用
+      description: |
+        支持文字、看图和 `image_generation` 图片工具。
+        图片工具必须使用 `gpt-image-2` 才能确保进入 Web 生图链路。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResponseRequest"
+      responses:
+        "200":
+          description: |
+            非流式时返回 Response 对象；`stream=true` 时返回
+            Responses 风格 SSE 事件。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResponseObject"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+  /v1/images/generations:
+    post:
+      operationId: generateWebImage
+      summary: ChatGPT Web 文生图
+      description: |
+        只允许文档化的 Web 图片模型 `gpt-image-2`。
+        `stream=true` 时返回图片进度和最终结果 SSE。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImageGenerationRequest"
+      responses:
+        "200":
+          description: 图片结果或 SSE
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageResponse"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+  /v1/images/edits:
+    post:
+      operationId: editWebImage
+      summary: ChatGPT Web 图片编辑与参考图生图
+      description: |
+        支持 multipart 文件、JSON Data URL、Base64 和公网图片 URL。
+        图片模型固定为 `gpt-image-2`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImageEditJsonRequest"
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ImageEditMultipartRequest"
+      responses:
+        "200":
+          description: 图片结果或 SSE
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageResponse"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API Key
+      description: 本项目的 auth-key，不是 ChatGPT Access Token
+  responses:
+    BadRequest:
+      description: 请求参数、图片、URL 或内容策略错误
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: API Key 无效
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    RateLimited:
+      description: 无可用 Web 生图额度或账号暂时限流
+      headers:
+        Retry-After:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    UpstreamError:
+      description: ChatGPT Web 上游失败
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    ModelList:
+      type: object
+      required:
+        - object
+        - data
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - object
+            properties:
+              id:
+                type: string
+              object:
+                type: string
+                const: model
+              created:
+                type: integer
+              owned_by:
+                type: string
+            additionalProperties: true
+    ContentPart:
+      oneOf:
+        - type: object
+          required:
+            - type
+            - text
+          properties:
+            type:
+              type: string
+              enum:
+                - text
+                - input_text
+            text:
+              type: string
+        - type: object
+          required:
+            - type
+            - image_url
+          properties:
+            type:
+              type: string
+              enum:
+                - image_url
+                - input_image
+            image_url:
+              oneOf:
+                - type: string
+                - type: object
+                  required:
+                    - url
+                  properties:
+                    url:
+                      type: string
+    ChatMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum:
+            - system
+            - user
+            - assistant
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                $ref: "#/components/schemas/ContentPart"
+    ChatCompletionRequest:
+      type: object
+      properties:
+        model:
+          type: string
+          default: auto
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+        prompt:
+          type: string
+          description: messages 的简化替代字段
+        stream:
+          type: boolean
+          default: false
+        n:
+          type: integer
+          minimum: 1
+          maximum: 4
+        reasoning_effort:
+          type: string
+          enum:
+            - low
+            - medium
+            - high
+            - xhigh
+            - extended
+      anyOf:
+        - required:
+            - messages
+        - required:
+            - prompt
+      additionalProperties: true
+    ChatCompletion:
+      type: object
+      required:
+        - id
+        - object
+        - choices
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: chat.completion
+        created:
+          type: integer
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              message:
+                type: object
+                properties:
+                  role:
+                    type: string
+                  content:
+                    type: string
+              finish_reason:
+                type:
+                  - string
+                  - "null"
+        usage:
+          type: object
+          additionalProperties: true
+    ResponseRequest:
+      type: object
+      properties:
+        model:
+          type: string
+          default: auto
+        instructions:
+          type: string
+        input: {}
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tool_choice: {}
+        stream:
+          type: boolean
+          default: false
+        reasoning:
+          type: object
+          properties:
+            effort:
+              type: string
+      required:
+        - input
+      additionalProperties: true
+    ResponseObject:
+      type: object
+      required:
+        - id
+        - object
+        - status
+        - output
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: response
+        created_at:
+          type: integer
+        status:
+          type: string
+        model:
+          type: string
+        output:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        usage:
+          type: object
+          additionalProperties: true
+    ImageGenerationRequest:
+      type: object
+      required:
+        - prompt
+      properties:
+        model:
+          type: string
+          const: gpt-image-2
+          default: gpt-image-2
+        prompt:
+          type: string
+          minLength: 1
+        n:
+          type: integer
+          minimum: 1
+          maximum: 4
+          default: 1
+        size:
+          type:
+            - string
+            - "null"
+          examples:
+            - 1024x1024
+            - 1536x1024
+            - 1024x1536
+        quality:
+          type: string
+          default: auto
+          enum:
+            - auto
+            - low
+            - high
+        response_format:
+          type: string
+          default: b64_json
+          enum:
+            - b64_json
+            - url
+        stream:
+          type: boolean
+          default: false
+    ImageReference:
+      oneOf:
+        - type: string
+          description: Data URL、纯 Base64 或公网 HTTP/HTTPS URL
+        - type: object
+          properties:
+            image_url:
+              oneOf:
+                - type: string
+                - type: object
+                  properties:
+                    url:
+                      type: string
+            url:
+              type: string
+            base64:
+              type: string
+            b64_json:
+              type: string
+            filename:
+              type: string
+            mime_type:
+              type: string
+          additionalProperties: true
+    ImageEditJsonRequest:
+      type: object
+      required:
+        - prompt
+      properties:
+        model:
+          type: string
+          const: gpt-image-2
+          default: gpt-image-2
+        prompt:
+          type: string
+          minLength: 1
+        image:
+          $ref: "#/components/schemas/ImageReference"
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageReference"
+        image_url:
+          $ref: "#/components/schemas/ImageReference"
+        mask:
+          $ref: "#/components/schemas/ImageReference"
+        n:
+          type: integer
+          minimum: 1
+          maximum: 4
+          default: 1
+        size:
+          type:
+            - string
+            - "null"
+        quality:
+          type: string
+          default: auto
+        response_format:
+          type: string
+          default: b64_json
+          enum:
+            - b64_json
+            - url
+        stream:
+          type: boolean
+          default: false
+      anyOf:
+        - required:
+            - image
+        - required:
+            - images
+        - required:
+            - image_url
+    ImageEditMultipartRequest:
+      type: object
+      required:
+        - prompt
+        - image
+      properties:
+        model:
+          type: string
+          const: gpt-image-2
+          default: gpt-image-2
+        prompt:
+          type: string
+        image:
+          oneOf:
+            - type: string
+              format: binary
+            - type: array
+              items:
+                type: string
+                format: binary
+        mask:
+          type: string
+          format: binary
+        n:
+          type: integer
+          minimum: 1
+          maximum: 4
+          default: 1
+        size:
+          type: string
+        quality:
+          type: string
+          default: auto
+        response_format:
+          type: string
+          default: b64_json
+        stream:
+          type: boolean
+          default: false
+    ImageData:
+      type: object
+      properties:
+        b64_json:
+          type: string
+        url:
+          type: string
+        revised_prompt:
+          type: string
+    ImageResponse:
+      type: object
+      required:
+        - created
+        - data
+      properties:
+        created:
+          type: integer
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageData"
+        usage:
+          type: object
+          additionalProperties: true
+    ErrorDetail:
+      type: object
+      properties:
+        message:
+          type: string
+        type:
+          type: string
+        param:
+          type:
+            - string
+            - "null"
+        code:
+          type:
+            - string
+            - "null"
+      additionalProperties: true
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          oneOf:
+            - type: string
+            - $ref: "#/components/schemas/ErrorDetail"
+        detail:
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: true
+      additionalProperties: true

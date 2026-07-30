@@ -5,7 +5,7 @@
 
 > 当前版本采用 **API-first** 定位：日常工作流只需使用 OpenAI 兼容接口；网页默认进入 API 控制台，用于生图联调、账号池和运行状态管理。原有高级功能没有删除，统一收纳在后台“更多”菜单中。
 
-工作流接入可直接使用零第三方依赖的 [`sdk/XGAPIClient`](./sdk/xg_api_client.py)，完整说明见 [`docs/API_WORKFLOW.md`](./docs/API_WORKFLOW.md)。
+工作流接入可直接使用零第三方依赖的 [`sdk/XGAPIClient`](./sdk/xg_api_client.py)。快速说明见 [`docs/API_WORKFLOW.md`](./docs/API_WORKFLOW.md)；只走 ChatGPT Web、包含文字/看图对话、文生图、参考图编辑、流式响应和完整请求示例的开发文档见 [`docs/WEB_API_REFERENCE.md`](./docs/WEB_API_REFERENCE.md)，也可导入 [`docs/openapi-web-api.yaml`](./docs/openapi-web-api.yaml)。
 
 本机网页默认启用免登录模式：通过 `localhost` 或 `127.0.0.1` 打开后直接进入管理控制台。这个便利模式不会取消 API 的 Bearer Key 鉴权，也不会对局域网地址自动授予管理员权限；需要恢复网页登录时，将 `CHATGPT2API_WEB_NO_LOGIN` 设置为 `false`。
 

@@ -2,6 +2,8 @@
 
 这个项目现在按 API-first 方式组织：工作流只依赖稳定的 OpenAI 兼容接口，网页主要用于生图联调、账号池和运行状态管理。原有高级能力仍然保留在后台“更多”菜单中。
 
+需要确保图片调用只走 ChatGPT Web、不消耗 Codex 生图额度，或需要文字对话、看图对话、参考图编辑、Mask、多图、Responses 和 SSE 的完整示例，请阅读 [`WEB_API_REFERENCE.md`](./WEB_API_REFERENCE.md)。Swagger、Postman 等工具可导入 [`openapi-web-api.yaml`](./openapi-web-api.yaml)。
+
 本机网页默认无需登录，访问 `http://127.0.0.1:8000` 会直接进入控制台。免登录只对启用了 `CHATGPT2API_WEB_NO_LOGIN` 的 loopback 同源浏览器请求生效；下列工作流 API 始终继续使用 Bearer API Key。
 
 ## 最小接入
