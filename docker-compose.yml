@@ -1,0 +1,46 @@
+services:
+  app:
+    image: chatgpt2api:local-v1.8.0
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: chatgpt2api
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:3000:80"
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json
+    environment:
+      # 存储后端配置 (可选值: json, sqlite, postgres, git)
+      - STORAGE_BACKEND=json
+      - CHATGPT2API_AUTH_KEY=${CHATGPT2API_AUTH_KEY:?set CHATGPT2API_AUTH_KEY in .env}
+      - CHATGPT2API_ADMIN_PASSWORD=${CHATGPT2API_ADMIN_PASSWORD:-}
+      - CHATGPT2API_WEB_NO_LOGIN=${CHATGPT2API_WEB_NO_LOGIN:-true}
+      - MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
+      - XG_SMTP_HOST=${XG_SMTP_HOST:-}
+      - XG_SMTP_PORT=${XG_SMTP_PORT:-465}
+      - XG_SMTP_USER=${XG_SMTP_USER:-}
+      - XG_SMTP_PASSWORD=${XG_SMTP_PASSWORD:-}
+      - XG_SMTP_FROM=${XG_SMTP_FROM:-}
+      - XG_SMTP_SSL=${XG_SMTP_SSL:-true}
+      - ALLOW_PRIVATE_NOTIFICATION_WEBHOOKS=${ALLOW_PRIVATE_NOTIFICATION_WEBHOOKS:-false}
+      - CHATGPT2API_FORCE_HTTPS=${CHATGPT2API_FORCE_HTTPS:-false}
+      # 留空时根据访问者使用的 Host 自动生成图片地址；局域网设备可正常加载结果。
+      - CHATGPT2API_BASE_URL=${CHATGPT2API_BASE_URL:-}
+      
+      # 数据库配置 (当 STORAGE_BACKEND=sqlite/postgres 时使用)
+      # - DATABASE_URL=postgresql://user:password@host:5432/dbname
+      # - DATABASE_URL=sqlite:///app/data/accounts.db
+      
+      # Git 仓库配置 (当 STORAGE_BACKEND=git 时使用)
+      # - GIT_REPO_URL=https://github.com/user/repo.git
+      # - GIT_TOKEN=ghp_xxxxxxxxxxxx
+      # - GIT_BRANCH=main
+      # - GIT_FILE_PATH=accounts.json
+      
+      # 认证密钥 (可选，覆盖 config.json)
+      # CHATGPT2API_AUTH_KEY is loaded from the gitignored .env file above.
+      
+      # 基础 URL (可选)
+      # - CHATGPT2API_BASE_URL=https://your-domain.com

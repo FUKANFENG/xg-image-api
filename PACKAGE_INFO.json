@@ -1,0 +1,18 @@
+{
+  "name": "XG生图-源码安全分发版-1.8.0-20260730",
+  "version": "1.8.0",
+  "type": "source",
+  "generated_at": "2026-07-30T01:14:50.373853+00:00",
+  "source_commit": "working-tree",
+  "source_file_count_before_metadata": 361,
+  "contains_local_accounts": false,
+  "contains_local_secrets": false,
+  "privacy_audit": "PRIVACY_AUDIT.json",
+  "excluded": [
+    ".git and Codex metadata",
+    "local .env and unsanitized config.json",
+    "data, logs, images, databases and account exports",
+    "node_modules, virtual environments and build outputs",
+    "native packages, backups, reports and test evidence"
+  ]
+}

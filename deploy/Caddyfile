@@ -1,0 +1,9 @@
+{$CHATGPT2API_HTTPS_HOST:localhost} {
+    tls internal
+    encode zstd gzip
+    reverse_proxy app:80
+
+    header {
+        -Server
+    }
+}
