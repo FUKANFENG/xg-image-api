@@ -339,7 +339,7 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(second, "token-one")
             self.assertEqual(preflight_calls, ["token-one", "token-one"])
 
-    def test_image_scheduler_balances_inflight_before_preferring_fast_account(self) -> None:
+    def test_image_scheduler_prefers_lower_predicted_finish_until_fast_account_is_full(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
             service.add_account_items(
@@ -363,13 +363,16 @@ class AccountCapabilityTests(unittest.TestCase):
 
             first = service._acquire_next_candidate_token()
             second = service._acquire_next_candidate_token()
+            third = service._acquire_next_candidate_token()
 
             try:
                 self.assertEqual(first, "fast-token")
-                self.assertEqual(second, "slow-token")
+                self.assertEqual(second, "fast-token")
+                self.assertEqual(third, "slow-token")
             finally:
                 service.release_image_slot(first)
                 service.release_image_slot(second)
+                service.release_image_slot(third)
 
     def test_image_scheduler_penalizes_consecutive_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

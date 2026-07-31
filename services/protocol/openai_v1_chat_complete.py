@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any, Iterable, Iterator
+from typing import Any, AsyncIterable, AsyncIterator, Iterable, Iterator
 
 from fastapi import HTTPException
 
@@ -238,6 +238,34 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
         response_format="b64_json",
         images=encode_images(images) or None,
     )))
+    return image_chat_response_from_result(body, result)
+
+
+def image_scheduler_payload(
+    body: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    model, prompt, n, images = chat_image_args(body)
+    payload: dict[str, Any] = {
+        "prompt": prompt,
+        "model": model,
+        "n": n,
+        "size": body.get("size"),
+        "quality": str(body.get("quality") or "auto"),
+        "response_format": "b64_json",
+        "stream": bool(body.get("stream")),
+    }
+    if images:
+        payload["images"] = images
+        payload["mask"] = []
+        return "edit", payload
+    return "generate", payload
+
+
+def image_chat_response_from_result(
+    body: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    model, prompt, _n, images = chat_image_args(body)
     response = completion_response(model, image_result_content(result), int(result.get("created") or 0) or None)
     usage = image_usage(
         input_text_tokens=count_text_tokens(prompt, model),
@@ -246,6 +274,48 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
     )
     response["usage"] = chat_usage_from_image_usage(usage)
     return response
+
+
+async def stream_scheduled_image_chat_completion(
+    chunks: AsyncIterable[dict[str, Any]],
+    model: str,
+) -> AsyncIterator[dict[str, Any]]:
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    sent_role = False
+    async for chunk in chunks:
+        content = ""
+        object_type = str(chunk.get("object") or "")
+        if object_type == "image.generation.result":
+            content = build_chat_image_markdown_content({
+                "data": chunk.get("data") or [],
+            })
+        elif object_type == "image.generation.message":
+            content = str(chunk.get("message") or "")
+        elif object_type == "image.generation.chunk":
+            content = str(chunk.get("progress_text") or "")
+        if not content:
+            continue
+        delta = {"content": content}
+        if not sent_role:
+            sent_role = True
+            delta["role"] = "assistant"
+        yield completion_chunk(
+            model,
+            delta,
+            None,
+            completion_id,
+            created,
+        )
+    if not sent_role:
+        yield completion_chunk(
+            model,
+            {"role": "assistant", "content": ""},
+            None,
+            completion_id,
+            created,
+        )
+    yield completion_chunk(model, {}, "stop", completion_id, created)
 
 
 def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:

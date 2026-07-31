@@ -137,6 +137,32 @@ def is_connection_timeout_error(message: str) -> bool:
     )
 
 
+def image_attempt_error_kind(error: BaseException) -> str:
+    """Map transport-specific failures to scheduler recovery categories."""
+    if isinstance(error, UpstreamHTTPError):
+        if error.status_code == 429:
+            return "rate_limit_exceeded"
+        if error.status_code in {401, 403}:
+            return "invalid_token"
+        if error.status_code >= 500:
+            return "server_error"
+        return f"upstream_http_{error.status_code}"
+    if isinstance(error, ImageGenerationError):
+        code = str(getattr(error, "code", "") or "").strip()
+        if code:
+            return code
+    message = str(error or "")
+    if is_token_invalid_error(message):
+        return "invalid_token"
+    if (
+        isinstance(error, (TimeoutError, ConnectionError))
+        or is_tls_connection_error(message)
+        or is_connection_timeout_error(message)
+    ):
+        return "network_timeout"
+    return type(error).__name__.lower() or "upstream_failure"
+
+
 def image_stream_error_message(message: str) -> str:
     text = str(message or "")
     if is_token_invalid_error(text):
@@ -1480,7 +1506,7 @@ def _generate_single_image(
     last_transient_error: ImageGenerationError | None = None
     account_email = ""
     account_ref = ""
-    _remaining_image_budget(request)
+    base_progress_callback = request.progress_callback
 
     while True:
         if request.cancel_event is not None and request.cancel_event.is_set():
@@ -1491,11 +1517,12 @@ def _generate_single_image(
                 request.progress_callback("getting_account")
             plan_type, _ = split_image_model(request.model)
             codex_model = is_codex_image_model(request.model)
+            account_deadline = time.monotonic() + float(config.image_submit_timeout_secs)
             token = account_service.get_available_access_token(
                 plan_type=plan_type,
                 source_type="codex" if codex_model else "web",
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
-                deadline_monotonic=request.deadline_monotonic,
+                deadline_monotonic=account_deadline,
                 excluded_tokens=excluded_tokens,
             )
         except (RuntimeError, TimeoutError) as exc:
@@ -1550,18 +1577,40 @@ def _generate_single_image(
                 })
 
         try:
-            if request.deadline_monotonic is None:
-                request = replace(
-                    request,
-                    deadline_monotonic=time.monotonic() + max(1.0, float(config.image_poll_timeout_secs)),
-                )
-            else:
-                _remaining_image_budget(request)
+            # Account selection and upstream submission use the short submit budget.
+            # The full generation budget starts only after the upstream conversation
+            # is known to have been accepted.
+            request = replace(
+                request,
+                deadline_monotonic=time.monotonic() + float(config.image_submit_timeout_secs),
+            )
             backend = OpenAIBackendAPI(access_token=token)
             backend.cancel_event = request.cancel_event
             backend.image_deadline_monotonic = request.deadline_monotonic
-            if request.progress_callback:
-                backend.progress_callback = request.progress_callback
+            latency_ms = account.get("image_latency_ema_ms")
+            try:
+                backend.image_expected_latency_secs = max(10.0, float(latency_ms or 45_000) / 1000.0)
+            except (TypeError, ValueError):
+                backend.image_expected_latency_secs = 45.0
+            generation_deadline_started = False
+
+            def attempt_progress_callback(step: str) -> None:
+                nonlocal generation_deadline_started
+                if (
+                    step in {"upstream_accepted", "image_stream_resolve_start"}
+                    and not generation_deadline_started
+                ):
+                    generation_deadline_started = True
+                    generation_deadline = (
+                        time.monotonic() + max(1.0, float(config.image_poll_timeout_secs))
+                    )
+                    request.deadline_monotonic = generation_deadline
+                    backend.image_deadline_monotonic = generation_deadline
+                if base_progress_callback:
+                    base_progress_callback(step)
+
+            request.progress_callback = attempt_progress_callback
+            backend.progress_callback = attempt_progress_callback
             stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
             outputs: list[ImageOutput] = []
             for output in stream_fn(backend, request, index, total):
@@ -1718,7 +1767,7 @@ def _generate_single_image(
                     "index": index,
                 })
                 continue
-            finish_image_attempt(False, error_kind=type(exc).__name__)
+            finish_image_attempt(False, error_kind=image_attempt_error_kind(exc))
             last_error = str(exc)
             logger.warning({
                 "event": "image_stream_fail",

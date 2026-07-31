@@ -84,6 +84,7 @@ class AccountService:
         self._image_preflight_success_until: dict[str, float] = {}
         self._cumulative_total = self._load_cumulative_total()
         self._initialize_image_performance_from_history()
+        self._initialize_fast_recovery_capacity()
 
     def _get_cumulative_file(self) -> Path:
         from services.config import DATA_DIR
@@ -275,10 +276,48 @@ class AccountService:
         if changed:
             self._save_accounts()
 
+    def _initialize_fast_recovery_capacity(self) -> None:
+        """Restart one step below each account's persisted safe concurrency."""
+        if not config.account_fast_recovery:
+            return
+        configured_max = min(3, max(1, int(config.image_account_concurrency or 1)))
+        changed = False
+        for token, current in list(self._accounts.items()):
+            stable = self._coerce_nonnegative_int(
+                current.get("image_stable_concurrency"),
+                maximum=configured_max,
+            )
+            if stable <= 1:
+                continue
+            target_dynamic = min(configured_max, stable - 1)
+            if (
+                self._coerce_nonnegative_int(
+                    current.get("image_dynamic_concurrency"),
+                    maximum=configured_max,
+                )
+                == target_dynamic
+                and self._coerce_nonnegative_int(
+                    current.get("image_success_streak"),
+                    maximum=100_000,
+                )
+                == 0
+            ):
+                continue
+            next_item = dict(current)
+            next_item["image_dynamic_concurrency"] = target_dynamic
+            next_item["image_success_streak"] = 0
+            account = self._normalize_account(next_item)
+            if account is not None:
+                self._accounts[token] = account
+                changed = True
+        if changed:
+            self._save_accounts()
+
     def _image_candidate_score_components(self, access_token: str) -> dict[str, int]:
-        """Build a quota-, reliability- and latency-aware score without exposing credentials."""
+        """Estimate completion time for a new task without exposing credentials."""
         account = self._accounts.get(access_token) or {}
         inflight = int(self._image_inflight.get(access_token, 0))
+        dynamic_limit = max(1, self._adaptive_image_concurrency(access_token))
         samples = self._coerce_nonnegative_int(account.get("image_latency_samples"), maximum=100_000)
         observed_latency = self._coerce_image_latency_ms(account.get("image_latency_ema_ms"))
         confidence = min(samples, self._IMAGE_LATENCY_FULL_CONFIDENCE_SAMPLES)
@@ -298,19 +337,44 @@ class AccountService:
         quota_penalty_ms = int(round(60_000 / max(1, min(quota, 100))))
         reliability_penalty_ms = int(round(failure_rate * 80_000))
         failure_streak_penalty_ms = failures * self._IMAGE_FAILURE_PENALTY_MS
-        score = int(round(effective_latency)) + quota_penalty_ms + reliability_penalty_ms + failure_streak_penalty_ms
+        load_factor = 1.0 + (inflight / dynamic_limit) ** 2
+        load_penalty_ms = int(round(effective_latency * (load_factor - 1.0)))
+        failure_kind = (
+            str(account.get("image_last_failure_kind") or "")
+            .lower()
+            .replace("_", " ")
+            .replace("-", " ")
+        )
+        circuit_state = str(account.get("image_circuit_state") or "closed")
+        rate_limit_penalty_ms = 0
+        if circuit_state == "half_open":
+            rate_limit_penalty_ms += 60_000
+        if any(marker in failure_kind for marker in ("429", "rate limit", "concurrency limit")):
+            rate_limit_penalty_ms += 45_000
+        predicted_finish_ms = int(round(effective_latency * load_factor))
+        score = (
+            predicted_finish_ms
+            + quota_penalty_ms
+            + reliability_penalty_ms
+            + failure_streak_penalty_ms
+            + rate_limit_penalty_ms
+        )
         return {
             "inflight": inflight,
+            "dynamic_limit": dynamic_limit,
             "effective_latency_ms": int(round(effective_latency)),
+            "load_penalty_ms": load_penalty_ms,
             "quota_penalty_ms": quota_penalty_ms,
             "reliability_penalty_ms": reliability_penalty_ms,
             "failure_streak_penalty_ms": failure_streak_penalty_ms,
+            "rate_limit_penalty_ms": rate_limit_penalty_ms,
+            "predicted_finish_ms": predicted_finish_ms,
             "scheduler_score": score,
         }
 
     def _image_candidate_score(self, access_token: str) -> tuple[int, int]:
         components = self._image_candidate_score_components(access_token)
-        return components["inflight"], components["scheduler_score"]
+        return components["scheduler_score"], components["inflight"]
 
     @staticmethod
     def _image_circuit_open_until(account: dict) -> float:
@@ -326,8 +390,28 @@ class AccountService:
         if self._image_circuit_open_until(account) > time.time():
             return 0
         state = str(account.get("image_circuit_state") or "closed")
+        if state in {"open", "half_open"}:
+            return 1
+        if config.account_fast_recovery:
+            dynamic = self._coerce_nonnegative_int(
+                account.get("image_dynamic_concurrency"),
+                maximum=configured_max,
+            )
+            if dynamic > 0:
+                return min(configured_max, dynamic)
+            stable = self._coerce_nonnegative_int(
+                account.get("image_stable_concurrency"),
+                maximum=configured_max,
+            )
+            if stable > 1:
+                return min(configured_max, max(1, stable - 1))
+            samples = self._coerce_nonnegative_int(account.get("image_latency_samples"), maximum=100_000)
+            latency_ms = self._coerce_image_latency_ms(account.get("image_latency_ema_ms"))
+            if samples >= self._IMAGE_LATENCY_FULL_CONFIDENCE_SAMPLES and latency_ms is not None:
+                return min(2, configured_max) if latency_ms < 120_000 else 1
+            return 1
         failures = self._coerce_nonnegative_int(account.get("image_consecutive_failures"), maximum=100)
-        if state in {"open", "half_open"} or failures > 0:
+        if failures > 0:
             return 1
         samples = self._coerce_nonnegative_int(account.get("image_latency_samples"), maximum=100_000)
         latency_ms = self._coerce_image_latency_ms(account.get("image_latency_ema_ms"))
@@ -340,7 +424,7 @@ class AccountService:
         return configured_max
 
     def _select_image_candidate_token(self, tokens: list[str]) -> str:
-        """Balance active work first, then prefer the fastest reliable candidate."""
+        """Choose the lowest predicted finish time; rotate only as the final tie-break."""
         if not tokens:
             raise ValueError("tokens is required")
         start_index = self._image_selection_index % len(tokens)
@@ -544,6 +628,24 @@ class AccountService:
         normalized["image_circuit_open_until"] = self._image_circuit_open_until(normalized)
         normalized["image_last_failure_kind"] = str(normalized.get("image_last_failure_kind") or "")
         normalized["image_last_failure_at"] = normalized.get("image_last_failure_at") or None
+        normalized["image_dynamic_concurrency"] = self._coerce_nonnegative_int(
+            normalized.get("image_dynamic_concurrency"), maximum=3
+        )
+        normalized["image_stable_concurrency"] = self._coerce_nonnegative_int(
+            normalized.get("image_stable_concurrency"), maximum=3
+        )
+        normalized["image_success_streak"] = self._coerce_nonnegative_int(
+            normalized.get("image_success_streak"), maximum=100_000
+        )
+        normalized["image_slow_streak"] = self._coerce_nonnegative_int(
+            normalized.get("image_slow_streak"), maximum=100
+        )
+        try:
+            normalized["image_soft_recovery_at"] = max(
+                0.0, float(normalized.get("image_soft_recovery_at") or 0.0)
+            )
+        except (TypeError, ValueError):
+            normalized["image_soft_recovery_at"] = 0.0
         normalized["image_performance_version"] = self._coerce_nonnegative_int(
             normalized.get("image_performance_version"),
             maximum=self._IMAGE_PERFORMANCE_SCHEMA_VERSION,
@@ -1718,6 +1820,14 @@ class AccountService:
                     return None
                 next_item = dict(current)
                 next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now_ts = time.time()
+                max_concurrency = min(3, max(1, int(config.image_account_concurrency or 1)))
+                current_dynamic = self._coerce_nonnegative_int(
+                    next_item.get("image_dynamic_concurrency"),
+                    maximum=max_concurrency,
+                )
+                if current_dynamic <= 0:
+                    current_dynamic = max(1, self._adaptive_image_concurrency(access_token))
                 if success:
                     next_item["success"] = int(next_item.get("success") or 0) + 1
                     next_item["quota"] = max(0, int(next_item.get("quota") or 0) - 1)
@@ -1733,6 +1843,53 @@ class AccountService:
                             + (1.0 - self._IMAGE_LATENCY_EMA_ALPHA) * previous_ema
                         ))
                         next_item["image_latency_samples"] = min(previous_samples + 1, 100_000)
+                    slow_streak = self._coerce_nonnegative_int(
+                        next_item.get("image_slow_streak"), maximum=100
+                    )
+                    latency_degraded = False
+                    if (
+                        latency_ms is not None
+                        and previous_ema is not None
+                        and previous_samples >= self._IMAGE_LATENCY_FULL_CONFIDENCE_SAMPLES
+                        and latency_ms > max(120_000, int(previous_ema * 1.6))
+                    ):
+                        slow_streak += 1
+                    else:
+                        slow_streak = max(0, slow_streak - 1)
+                    if slow_streak >= 2 and current_dynamic > 1:
+                        current_dynamic -= 1
+                        slow_streak = 0
+                        latency_degraded = True
+                        next_item["image_soft_recovery_at"] = (
+                            now_ts + config.account_soft_recovery_seconds
+                        )
+                    next_item["image_slow_streak"] = slow_streak
+
+                    success_streak = self._coerce_nonnegative_int(
+                        next_item.get("image_success_streak"), maximum=100_000
+                    ) + 1
+                    soft_recovery_at = float(next_item.get("image_soft_recovery_at") or 0.0)
+                    if (
+                        config.account_fast_recovery
+                        and not latency_degraded
+                        and current_dynamic < max_concurrency
+                        and now_ts >= soft_recovery_at
+                    ):
+                        threshold = config.account_probe_successes
+                        if current_dynamic >= 2:
+                            threshold *= 2
+                        if success_streak >= threshold:
+                            current_dynamic += 1
+                            success_streak = 0
+                    next_item["image_dynamic_concurrency"] = current_dynamic
+                    next_item["image_stable_concurrency"] = max(
+                        self._coerce_nonnegative_int(
+                            next_item.get("image_stable_concurrency"),
+                            maximum=max_concurrency,
+                        ),
+                        current_dynamic,
+                    )
+                    next_item["image_success_streak"] = success_streak
                     next_item["image_consecutive_failures"] = 0
                     next_item["image_circuit_state"] = "closed"
                     next_item["image_circuit_open_until"] = 0.0
@@ -1744,26 +1901,61 @@ class AccountService:
                         next_item["status"] = "正常"
                 else:
                     next_item["fail"] = int(next_item.get("fail") or 0) + 1
+                    next_item["image_success_streak"] = 0
                     if performance_failure:
                         if invalidate_preflight:
                             self._invalidate_image_preflight_success_locked(access_token)
-                        failure_count = min(
-                            self._coerce_nonnegative_int(
-                                next_item.get("image_consecutive_failures"), maximum=100
-                            ) + 1,
-                            100,
+                        normalized_error_kind = str(error_kind or "upstream_failure")[:120]
+                        error_text = (
+                            normalized_error_kind.lower().replace("_", " ").replace("-", " ")
                         )
-                        next_item["image_consecutive_failures"] = failure_count
-                        next_item["image_last_failure_kind"] = str(error_kind or "upstream_failure")[:120]
+                        hard_rate_limit = any(
+                            marker in error_text
+                            for marker in (
+                                "429",
+                                "rate limit",
+                                "concurrency limit",
+                                "too many requests",
+                            )
+                        )
+                        auth_failure = any(
+                            marker in error_text
+                            for marker in (
+                                "invalid token",
+                                "authentication",
+                                "unauthorized",
+                                "401",
+                                "403",
+                            )
+                        )
+                        failure_count = self._coerce_nonnegative_int(
+                            next_item.get("image_consecutive_failures"), maximum=100
+                        )
+                        if not auth_failure:
+                            failure_count = min(failure_count + 1, 100)
+                        next_item["image_last_failure_kind"] = normalized_error_kind
                         next_item["image_last_failure_at"] = self._now()
-                        if (
-                            self._normalize_source_type(next_item.get("source_type")) == "web"
-                            and failure_count >= config.image_circuit_failure_threshold
-                        ):
+                        if hard_rate_limit:
+                            next_item["image_dynamic_concurrency"] = max(1, current_dynamic - 1)
+                            next_item["image_consecutive_failures"] = 0
                             next_item["image_circuit_state"] = "open"
                             next_item["image_circuit_open_until"] = (
-                                time.time() + config.image_circuit_cooldown_secs
+                                now_ts + config.account_hard_rate_limit_cooldown_seconds
                             )
+                        elif (
+                            not auth_failure
+                            and failure_count >= config.image_circuit_failure_threshold
+                        ):
+                            next_item["image_dynamic_concurrency"] = max(1, current_dynamic - 1)
+                            next_item["image_consecutive_failures"] = 0
+                            next_item["image_circuit_state"] = "degraded"
+                            next_item["image_circuit_open_until"] = 0.0
+                            next_item["image_soft_recovery_at"] = (
+                                now_ts + config.account_soft_recovery_seconds
+                            )
+                        else:
+                            next_item["image_dynamic_concurrency"] = current_dynamic
+                            next_item["image_consecutive_failures"] = failure_count
                 account = self._normalize_account(next_item)
                 if account is None:
                     return None
@@ -2291,19 +2483,23 @@ class AccountService:
                     "consecutive_failures": consecutive_failures,
                     "last_failure_kind": str(account.get("image_last_failure_kind") or ""),
                     "scheduler_score": scheduler["scheduler_score"],
+                    "predicted_finish_ms": scheduler["predicted_finish_ms"],
                     "scheduler_factors": {
                         "effective_latency_ms": scheduler["effective_latency_ms"],
+                        "dynamic_limit": scheduler["dynamic_limit"],
+                        "load_penalty_ms": scheduler["load_penalty_ms"],
                         "quota_penalty_ms": scheduler["quota_penalty_ms"],
                         "reliability_penalty_ms": scheduler["reliability_penalty_ms"],
                         "failure_streak_penalty_ms": scheduler["failure_streak_penalty_ms"],
+                        "rate_limit_penalty_ms": scheduler["rate_limit_penalty_ms"],
                     },
                 })
             ranked = sorted(
                 range(len(items)),
                 key=lambda index: (
                     not bool(items[index]["available"]),
-                    int(items[index]["inflight"]),
                     int(items[index]["scheduler_score"]),
+                    int(items[index]["inflight"]),
                     index,
                 ),
             )

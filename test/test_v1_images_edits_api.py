@@ -24,13 +24,15 @@ class ImagesEditsApiTests(unittest.TestCase):
             self.handle_calls.append(payload)
             return {"created": 1, "data": [{"b64_json": base64.b64encode(b"out").decode("ascii")}]}
 
-        self.handler_patcher = mock.patch.object(ai_module.openai_v1_image_edit, "handle", fake_handle)
         self.task_tracker = mock.Mock()
-        self.task_tracker.begin_api_call.return_value = {"id": "api-edit-test"}
+        self.task_tracker.run_api_edit_async = mock.AsyncMock(
+            side_effect=lambda _identity, payload: fake_handle(payload)
+        )
         self.task_tracker_patcher = mock.patch.object(ai_module, "image_task_service", self.task_tracker)
-        self.handler_patcher.start()
+        self.filter_patcher = mock.patch.object(ai_module, "filter_or_log", mock.AsyncMock())
+        self.filter_patcher.start()
         self.task_tracker_patcher.start()
-        self.addCleanup(self.handler_patcher.stop)
+        self.addCleanup(self.filter_patcher.stop)
         self.addCleanup(self.task_tracker_patcher.stop)
         app = FastAPI()
         app.include_router(ai_module.create_router())

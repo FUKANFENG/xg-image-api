@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable, Iterator
+from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, Future, wait
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,7 +24,7 @@ from services.image_storage_service import image_storage_service
 from services.image_task_store import ImageTaskStore
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
-from services.protocol.conversation import public_image_error_message
+from services.protocol.conversation import ImageGenerationError, public_image_error_message
 
 TASK_STATUS_QUEUED = "queued"
 TASK_STATUS_PAUSED = "paused"
@@ -42,16 +44,32 @@ RECOVERABLE_POLL_ERROR_CODES = {
 _PROGRESS_STAGES = {
     "getting_account": "account_selection",
     "starting_generation": "upstream_generation",
+    "upstream_accepted": "upstream_submitted",
     "image_stream_resolve_start": "upstream_submitted",
     "receiving_image": "result_download",
+    "polling": "polling",
     "resume_poll": "resume_polling",
     "paused": "paused",
 }
 module_logger = logging.getLogger(__name__)
+_POSTPROCESS_CONCURRENCY = 8
+_POSTPROCESS_SLOTS = threading.BoundedSemaphore(_POSTPROCESS_CONCURRENCY)
 
 
 class ImageQueueFullError(ValueError):
     """The bounded global image queue cannot accept more work."""
+
+    status_code = 429
+
+    def to_openai_error(self) -> dict[str, Any]:
+        return {
+            "error": {
+                "message": str(self),
+                "type": "rate_limit_error",
+                "param": None,
+                "code": "image_queue_full",
+            }
+        }
 
 
 @dataclass(slots=True)
@@ -66,6 +84,13 @@ class _QueuedImageWork:
     credit_reserved: bool
     priority: int = 0
     start_failure_restore: dict[str, Any] | None = None
+    enqueued_at: float = field(default_factory=time.monotonic)
+
+
+@dataclass(slots=True)
+class _ApiTaskCompletion:
+    parent_key: str
+    future: Future[dict[str, Any]] = field(default_factory=Future)
 
 
 def _now_iso() -> str:
@@ -318,6 +343,10 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     }
     if task.get("request_n") is not None:
         item["request_n"] = _nonnegative_int(task.get("request_n"), maximum=4) or 1
+    if task.get("child_total") is not None:
+        item["child_total"] = _nonnegative_int(task.get("child_total"), maximum=4)
+        item["completed_children"] = _nonnegative_int(task.get("completed_children"), maximum=4)
+        item["failed_children"] = _nonnegative_int(task.get("failed_children"), maximum=4)
     if task.get("response_format"):
         item["response_format"] = _clean(task.get("response_format"))
     if task.get("caller_key_id"):
@@ -417,8 +446,10 @@ class ImageTaskService:
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
         self._active_attempts: dict[str, threading.Event] = {}
+        self._api_completions: dict[str, _ApiTaskCompletion] = {}
+        self._credit_settlements: set[str] = set()
         self._project_budget_settlements: set[str] = set()
-        self._pending_by_owner: dict[str, deque[_QueuedImageWork]] = {}
+        self._pending_by_owner: dict[str, dict[int, deque[_QueuedImageWork]]] = {}
         self._paused_work: dict[str, _QueuedImageWork] = {}
         self._owner_cycle: deque[str] = deque()
         self._last_dispatched_owner = ""
@@ -427,6 +458,10 @@ class ImageTaskService:
         self._running_total = 0
         self._queue_rejected_total = 0
         self._recent_durations_secs: deque[float] = deque(maxlen=100)
+        self._recent_queue_wait_ms: deque[float] = deque(maxlen=500)
+        self._recent_slot_handoff_ms: deque[float] = deque(maxlen=500)
+        self._recent_postprocess_wait_ms: deque[float] = deque(maxlen=500)
+        self._postprocess_active = 0
         self._storage_health_cache: dict[str, object] = {}
         self._storage_health_checked_at = 0.0
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -473,7 +508,7 @@ class ImageTaskService:
 
     def _queue_limits(self) -> tuple[int, int, int]:
         try:
-            global_limit = max(1, min(12, int(self.global_concurrency_getter())))
+            global_limit = max(1, min(16, int(self.global_concurrency_getter())))
         except Exception:
             global_limit = 8
         try:
@@ -508,34 +543,123 @@ class ImageTaskService:
         return global_limit, user_limit, queue_capacity, account_capacity, effective_global_limit
 
     def _pending_count_locked(self) -> int:
-        return sum(len(items) for items in self._pending_by_owner.values())
+        return sum(
+            self._owner_pending_count(buckets)
+            for buckets in self._pending_by_owner.values()
+        )
+
+    def _projected_pending_after_submission_locked(
+        self,
+        owner_id: str,
+        task_count: int,
+        *,
+        user_limit: int,
+        effective_global_limit: int,
+    ) -> int:
+        pending_by_owner = {
+            owner: self._owner_pending_count(buckets)
+            for owner, buckets in self._pending_by_owner.items()
+        }
+        pending_by_owner[owner_id] = pending_by_owner.get(owner_id, 0) + task_count
+        total_pending = sum(pending_by_owner.values())
+        available_global = max(0, effective_global_limit - self._running_total)
+        if config.image_allow_user_borrowing:
+            dispatchable = min(available_global, total_pending)
+        else:
+            dispatchable = min(
+                available_global,
+                sum(
+                    min(
+                        queued,
+                        max(0, user_limit - self._running_by_owner.get(owner, 0)),
+                    )
+                    for owner, queued in pending_by_owner.items()
+                ),
+            )
+        return max(0, total_pending - dispatchable)
+
+    @staticmethod
+    def _owner_pending_count(buckets: dict[int, deque[_QueuedImageWork]]) -> int:
+        return sum(len(items) for items in buckets.values())
+
+    @staticmethod
+    def _owner_has_pending(buckets: dict[int, deque[_QueuedImageWork]]) -> bool:
+        return any(items for items in buckets.values())
+
+    @staticmethod
+    def _insert_priority_bucket(
+        bucket: deque[_QueuedImageWork],
+        work: _QueuedImageWork,
+    ) -> None:
+        # Normal submissions arrive in monotonic order and stay O(1). A manual
+        # priority change can move an older task into this bucket, so retain its
+        # original aging time with a rare ordered insertion.
+        if not bucket or bucket[-1].enqueued_at <= work.enqueued_at:
+            bucket.append(work)
+            return
+        insert_at = next(
+            (
+                index
+                for index, queued in enumerate(bucket)
+                if queued.enqueued_at > work.enqueued_at
+            ),
+            len(bucket),
+        )
+        bucket.insert(insert_at, work)
+
+    @staticmethod
+    def _pop_best_owner_work(
+        buckets: dict[int, deque[_QueuedImageWork]],
+        *,
+        now: float | None = None,
+    ) -> _QueuedImageWork | None:
+        available = [
+            (priority, items)
+            for priority, items in buckets.items()
+            if items
+        ]
+        if not available:
+            return None
+        current = time.monotonic() if now is None else now
+        aging_secs = max(1.0, float(config.image_priority_aging_secs))
+        priority, bucket = max(
+            available,
+            key=lambda item: (
+                item[0]
+                + int(max(0.0, current - item[1][0].enqueued_at) // aging_secs),
+                -item[1][0].enqueued_at,
+            ),
+        )
+        work = bucket.popleft()
+        if not bucket:
+            buckets.pop(priority, None)
+        return work
 
     def _enqueue_work_locked(self, work: _QueuedImageWork) -> None:
-        queue = self._pending_by_owner.get(work.owner_id)
-        if queue is None:
-            queue = deque()
-            self._pending_by_owner[work.owner_id] = queue
+        buckets = self._pending_by_owner.get(work.owner_id)
+        if buckets is None:
+            buckets = {}
+            self._pending_by_owner[work.owner_id] = buckets
             self._owner_cycle.append(work.owner_id)
-        insert_at = len(queue)
-        for index, queued in enumerate(queue):
-            if work.priority > queued.priority:
-                insert_at = index
-                break
-        queue.insert(insert_at, work)
+        bucket = buckets.setdefault(work.priority, deque())
+        self._insert_priority_bucket(bucket, work)
 
     def _take_pending_work_locked(self, key: str) -> _QueuedImageWork | None:
         found: _QueuedImageWork | None = None
         empty_owners: list[str] = []
-        for owner_id, queue in self._pending_by_owner.items():
-            retained: deque[_QueuedImageWork] = deque()
-            for work in queue:
-                if found is None and work.key == key:
-                    found = work
+        for owner_id, buckets in list(self._pending_by_owner.items()):
+            for priority, bucket in list(buckets.items()):
+                retained: deque[_QueuedImageWork] = deque()
+                for work in bucket:
+                    if found is None and work.key == key:
+                        found = work
+                    else:
+                        retained.append(work)
+                if retained:
+                    buckets[priority] = retained
                 else:
-                    retained.append(work)
-            if retained:
-                self._pending_by_owner[owner_id] = retained
-            else:
+                    buckets.pop(priority, None)
+            if not self._owner_has_pending(buckets):
                 empty_owners.append(owner_id)
         for owner_id in empty_owners:
             self._pending_by_owner.pop(owner_id, None)
@@ -553,15 +677,18 @@ class ImageTaskService:
             self._owner_cycle.rotate(-(owner_index + 1))
         for _ in range(len(self._owner_cycle)):
             owner_id = self._owner_cycle.popleft()
-            queue = self._pending_by_owner.get(owner_id)
-            if not queue:
+            buckets = self._pending_by_owner.get(owner_id)
+            if not buckets or not self._owner_has_pending(buckets):
                 self._pending_by_owner.pop(owner_id, None)
                 continue
             if owner_limit is not None and self._running_by_owner.get(owner_id, 0) >= owner_limit:
                 self._owner_cycle.append(owner_id)
                 continue
-            work = queue.popleft()
-            if queue:
+            work = self._pop_best_owner_work(buckets)
+            if work is None:
+                self._pending_by_owner.pop(owner_id, None)
+                continue
+            if self._owner_has_pending(buckets):
                 self._owner_cycle.append(owner_id)
             else:
                 self._pending_by_owner.pop(owner_id, None)
@@ -574,11 +701,25 @@ class ImageTaskService:
         work = self._next_owner_work_locked(user_limit)
         if work is not None:
             return work
-        return self._next_owner_work_locked(None)
+        if config.image_allow_user_borrowing:
+            return self._next_owner_work_locked(None)
+        return None
 
     def _handle_worker_start_failure_locked(self, work: _QueuedImageWork, error: BaseException) -> None:
         self._active_attempts.pop(work.key, None)
         task = self._tasks.get(work.key) or work.start_failure_restore or {}
+        if _clean(task.get("source")) == "api_child":
+            self._update_task(
+                work.key,
+                status=TASK_STATUS_ERROR,
+                error="图片任务工作线程启动失败，请稍后重试",
+                error_code="task_worker_start_failed",
+                data=[],
+                duration_ms=0,
+                last_checkpoint="failed",
+            )
+            self._signal_api_completion_locked(work.key, error=error)
+            return
         credit_settled = not work.credit_reserved or self._refund_credit(work.identity, work.task_id)
         project_settled = not task.get("project_budget_reserved") or self._refund_project_budget(
             work.identity,
@@ -618,6 +759,9 @@ class ImageTaskService:
             work = self._next_work_locked(user_limit)
             if work is None:
                 break
+            self._recent_queue_wait_ms.append(
+                max(0.0, (time.monotonic() - work.enqueued_at) * 1_000.0)
+            )
             self._running_total += 1
             self._running_by_owner[work.owner_id] += 1
             self._running_keys.add(work.key)
@@ -646,19 +790,53 @@ class ImageTaskService:
         try:
             work.runner(*work.args)
         finally:
-            with self._lock:
-                if work.key in self._running_keys:
-                    self._running_keys.discard(work.key)
-                    self._running_total = max(0, self._running_total - 1)
-                    next_count = max(0, self._running_by_owner.get(work.owner_id, 0) - 1)
-                    if next_count:
-                        self._running_by_owner[work.owner_id] = next_count
-                    else:
-                        self._running_by_owner.pop(work.owner_id, None)
+            self._release_running_slot(work.key, work.owner_id)
+
+    def _release_running_slot(self, key: str, owner_id: str) -> None:
+        with self._lock:
+            if key not in self._running_keys:
+                return
+            self._running_keys.discard(key)
+            self._running_total = max(0, self._running_total - 1)
+            next_count = max(0, self._running_by_owner.get(owner_id, 0) - 1)
+            if next_count:
+                self._running_by_owner[owner_id] = next_count
+            else:
+                self._running_by_owner.pop(owner_id, None)
+            handoff_started = time.monotonic()
+            running_before_dispatch = self._running_total
+            try:
                 self._dispatch_locked()
+            except Exception:
+                module_logger.exception("failed to dispatch image work after slot release")
+                return
+            if self._running_total > running_before_dispatch:
+                self._recent_slot_handoff_ms.append(
+                    max(0.0, (time.monotonic() - handoff_started) * 1_000.0)
+                )
+
+    def _acquire_postprocess_slot(self) -> None:
+        started = time.monotonic()
+        _POSTPROCESS_SLOTS.acquire()
+        wait_ms = max(0.0, (time.monotonic() - started) * 1_000.0)
+        with self._lock:
+            self._postprocess_active += 1
+            self._recent_postprocess_wait_ms.append(wait_ms)
+
+    def _release_postprocess_slot(self) -> None:
+        with self._lock:
+            self._postprocess_active = max(0, self._postprocess_active - 1)
+        _POSTPROCESS_SLOTS.release()
 
     def _queued_keys_locked(self) -> list[str]:
-        queues = {owner: deque(items) for owner, items in self._pending_by_owner.items()}
+        queues = {
+            owner: {
+                priority: deque(items)
+                for priority, items in buckets.items()
+                if items
+            }
+            for owner, buckets in self._pending_by_owner.items()
+        }
         cycle = deque(owner for owner in self._owner_cycle if owner in queues)
         if self._last_dispatched_owner and self._last_dispatched_owner in cycle:
             owner_index = list(cycle).index(self._last_dispatched_owner)
@@ -666,11 +844,14 @@ class ImageTaskService:
         ordered: list[str] = []
         while cycle:
             owner_id = cycle.popleft()
-            queue = queues.get(owner_id)
-            if not queue:
+            buckets = queues.get(owner_id)
+            if not buckets:
                 continue
-            ordered.append(queue.popleft().key)
-            if queue:
+            work = self._pop_best_owner_work(buckets)
+            if work is None:
+                continue
+            ordered.append(work.key)
+            if self._owner_has_pending(buckets):
                 cycle.append(owner_id)
         return ordered
 
@@ -687,8 +868,17 @@ class ImageTaskService:
             queued_keys = self._queued_keys_locked()
         else:
             queued_keys = []
-        if key in queued_keys:
-            position = queued_keys.index(key) + 1
+        position_key = key
+        if position_key not in queued_keys and _clean(task.get("source")) == "api":
+            owner = _clean(task.get("owner_id"))
+            child_keys = [
+                _task_key(owner, _clean(child_id))
+                for child_id in task.get("child_task_ids") or []
+                if _clean(child_id)
+            ]
+            position_key = next((child_key for child_key in child_keys if child_key in queued_keys), key)
+        if position_key in queued_keys:
+            position = queued_keys.index(position_key) + 1
             _, _, _, _, global_limit = self._dispatch_limits()
             item["queue_position"] = position
             item["queue_total"] = len(queued_keys)
@@ -902,7 +1092,9 @@ class ImageTaskService:
                 items = [
                     self._public_task_locked(task)
                     for task in self._tasks.values()
-                    if task.get("owner_id") == owner and _clean(task.get("id")) not in hidden_legacy_retry_task_ids
+                    if task.get("owner_id") == owner
+                    and _clean(task.get("source")) != "api_child"
+                    and _clean(task.get("id")) not in hidden_legacy_retry_task_ids
                 ]
                 items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
                 total = len(items)
@@ -944,12 +1136,16 @@ class ImageTaskService:
                 self._dispatch_limits()
             )
             queued = self._pending_count_locked()
-            owner_queued = len(self._pending_by_owner.get(owner) or ())
+            owner_queued = self._owner_pending_count(
+                self._pending_by_owner.get(owner) or {}
+            )
             running = self._running_total
             owner_running = self._running_by_owner.get(owner, 0)
             duration = max(1.0, self._estimated_duration_secs_locked())
             contending_owners = {
-                owner_id for owner_id, items in self._pending_by_owner.items() if items
+                owner_id
+                for owner_id, buckets in self._pending_by_owner.items()
+                if self._owner_has_pending(buckets)
             } | {
                 owner_id for owner_id, count in self._running_by_owner.items() if count > 0
             }
@@ -977,7 +1173,7 @@ class ImageTaskService:
                 "user_concurrency": user_limit,
                 "effective_user_concurrency": owner_dispatch_limit,
                 "account_slot_capacity": account_capacity,
-                "work_conserving": True,
+                "work_conserving": bool(config.image_allow_user_borrowing),
                 "estimated_wait_secs": wait_secs,
                 "estimated_generation_secs": generation_secs,
                 "estimated_total_secs": total_secs,
@@ -999,10 +1195,13 @@ class ImageTaskService:
             borrowed_user_slots = sum(
                 max(0, int(count) - user_limit) for count in self._running_by_owner.values()
             )
+            visible_tasks = [
+                task for task in self._tasks.values() if _clean(task.get("source")) != "api_child"
+            ]
             recent_successes = sorted(
                 (
                     task
-                    for task in self._tasks.values()
+                    for task in visible_tasks
                     if task.get("status") == TASK_STATUS_SUCCESS
                     and isinstance(task.get("duration_ms"), (int, float))
                 ),
@@ -1012,31 +1211,44 @@ class ImageTaskService:
                 float(task.get("duration_ms")) / 1000.0
                 for task in recent_successes
             )
+            queue_wait_ms = sorted(self._recent_queue_wait_ms)
+            slot_handoff_ms = sorted(self._recent_slot_handoff_ms)
+            postprocess_wait_ms = sorted(self._recent_postprocess_wait_ms)
+            phases = {"submitting": 0, "remote_running": 0, "polling": 0}
+            for key in self._running_keys:
+                task = self._tasks.get(key) or {}
+                progress = _clean(task.get("progress"))
+                if progress in {"getting_account", "starting_generation"}:
+                    phases["submitting"] += 1
+                elif progress in {"polling", "resume_poll"}:
+                    phases["polling"] += 1
+                else:
+                    phases["remote_running"] += 1
             if now - self._storage_health_checked_at >= 30.0 or not self._storage_health_cache:
                 self._storage_health_cache = self.store.health()
                 self._storage_health_checked_at = now
 
-            def percentile(fraction: float) -> float:
-                if not durations:
+            def percentile(values: list[float], fraction: float) -> float:
+                if not values:
                     return 0.0
-                rank = max(0, min(len(durations) - 1, int((len(durations) - 1) * fraction + 0.999999)))
-                return round(durations[rank], 1)
+                rank = max(0, min(len(values) - 1, int((len(values) - 1) * fraction + 0.999999)))
+                return round(values[rank], 1)
 
             completed_last_minute = sum(
                 1
-                for task in self._tasks.values()
+                for task in visible_tasks
                 if task.get("status") == TASK_STATUS_SUCCESS
                 and isinstance(task.get("updated_ts"), (int, float))
                 and float(task["updated_ts"]) >= now - 60.0
             )
             error_counts: dict[str, int] = {}
-            for task in self._tasks.values():
+            for task in visible_tasks:
                 if task.get("status") != TASK_STATUS_ERROR:
                     continue
                 error_code = _clean(task.get("error_code"), "upstream_error")
                 error_counts[error_code] = error_counts.get(error_code, 0) + 1
             status_counts = {
-                status: sum(1 for task in self._tasks.values() if task.get("status") == status)
+                status: sum(1 for task in visible_tasks if task.get("status") == status)
                 for status in (
                     TASK_STATUS_QUEUED,
                     TASK_STATUS_PAUSED,
@@ -1051,7 +1263,7 @@ class ImageTaskService:
             owners: dict[str, dict[str, object]] = {}
             total_duration_ms = 0.0
             duration_count = 0
-            for task in self._tasks.values():
+            for task in visible_tasks:
                 day = _clean(task.get("created_at"))[:10] or "unknown"
                 daily_item = daily.setdefault(day, {"date": day, "total": 0, "success": 0, "error": 0})
                 daily_item["total"] = int(daily_item["total"]) + 1
@@ -1088,7 +1300,9 @@ class ImageTaskService:
                     "account_slot_capacity": account_capacity,
                     "available_dispatch_slots": max(0, effective_global_limit - self._running_total),
                     "borrowed_user_slots": borrowed_user_slots,
-                    "work_conserving": True,
+                    "work_conserving": bool(config.image_allow_user_borrowing),
+                    "scheduler_mode": "fast",
+                    "phases": phases,
                     "slot_utilization_percent": round(
                         100.0 * self._running_total / effective_global_limit,
                         1,
@@ -1098,12 +1312,20 @@ class ImageTaskService:
                     "saturation_percent": round(100.0 * queued / queue_capacity, 1),
                 },
                 "performance": {
-                    "p50_secs": percentile(0.50),
-                    "p95_secs": percentile(0.95),
+                    "p50_secs": percentile(durations, 0.50),
+                    "p95_secs": percentile(durations, 0.95),
+                    "queue_wait_p50_ms": percentile(queue_wait_ms, 0.50),
+                    "queue_wait_p95_ms": percentile(queue_wait_ms, 0.95),
+                    "slot_handoff_p50_ms": percentile(slot_handoff_ms, 0.50),
+                    "slot_handoff_p95_ms": percentile(slot_handoff_ms, 0.95),
+                    "slot_handoff_samples": len(slot_handoff_ms),
+                    "postprocess_active": self._postprocess_active,
+                    "postprocess_concurrency": _POSTPROCESS_CONCURRENCY,
+                    "postprocess_wait_p95_ms": percentile(postprocess_wait_ms, 0.95),
                     "throughput_per_minute": completed_last_minute,
                     "estimated_task_secs": round(self._estimated_duration_secs_locked(), 1),
                 },
-                "tasks": {"total": len(self._tasks), **status_counts},
+                "tasks": {"total": len(visible_tasks), **status_counts},
                 "analytics": {
                     "summary": {
                         "success_rate": round(100.0 * status_counts[TASK_STATUS_SUCCESS] / terminal_count, 1) if terminal_count else 0.0,
@@ -1291,6 +1513,47 @@ class ImageTaskService:
             if task.get("status") not in UNFINISHED_STATUSES:
                 return self._public_task_locked(task)
 
+            if _clean(task.get("source")) == "api":
+                owner = _clean(task.get("owner_id"))
+                for child_id in task.get("child_task_ids") or []:
+                    child_key = _task_key(owner, _clean(child_id))
+                    child = self._tasks.get(child_key)
+                    if child is None or child.get("status") not in UNFINISHED_STATUSES:
+                        continue
+                    self._remove_pending_work_locked(child_key)
+                    child_cancel_event = self._active_attempts.pop(child_key, None)
+                    if child_cancel_event is not None:
+                        child_cancel_event.set()
+                    self._update_task(
+                        child_key,
+                        status=TASK_STATUS_ERROR,
+                        error="已由用户手动停止",
+                        error_code="cancelled_by_user",
+                        progress="cancelled",
+                        data=[],
+                        duration_ms=int(
+                            max(0.0, time.time() - _task_created_timestamp(child)) * 1_000
+                        ),
+                    )
+                    self._signal_api_completion_locked(
+                        child_key,
+                        error=RuntimeError("image task cancelled"),
+                    )
+                self._update_task(
+                    key,
+                    status=TASK_STATUS_ERROR,
+                    error="已由用户手动停止",
+                    error_code="cancelled_by_user",
+                    progress="cancelled",
+                    data=[],
+                    duration_ms=int(
+                        max(0.0, time.time() - _task_created_timestamp(task)) * 1_000
+                    ),
+                    last_checkpoint="failed",
+                )
+                self._dispatch_locked()
+                return self._public_task_locked(self._tasks[key])
+
             self._remove_pending_work_locked(key)
             self._paused_work.pop(key, None)
             cancel_event = self._active_attempts.pop(key, None)
@@ -1345,6 +1608,14 @@ class ImageTaskService:
             suffix, "image/png"
         )
         return payload, Path(normalized).name or "source.png", content_type
+
+    @staticmethod
+    def _restored_enqueued_at(task: dict[str, Any]) -> float:
+        created_ts = task.get("created_ts")
+        if not isinstance(created_ts, (int, float)):
+            return time.monotonic()
+        elapsed = max(0.0, time.time() - float(created_ts))
+        return time.monotonic() - elapsed
 
     def _rebuild_paused_work(self, task: dict[str, Any]) -> _QueuedImageWork:
         workflow = task.get("workflow") if isinstance(task.get("workflow"), dict) else {}
@@ -1401,6 +1672,7 @@ class ImageTaskService:
             identity=identity,
             credit_reserved=bool(task.get("credit_reserved")),
             priority=_priority(task.get("priority")),
+            enqueued_at=self._restored_enqueued_at(task),
         )
 
     def _rebuild_resume_work(self, task: dict[str, Any], *, timeout_secs: float = 45.0) -> _QueuedImageWork:
@@ -1437,6 +1709,7 @@ class ImageTaskService:
             credit_reserved=bool(task.get("credit_reserved")),
             priority=_priority(task.get("priority")),
             start_failure_restore=dict(task),
+            enqueued_at=self._restored_enqueued_at(task),
         )
 
     def resume_task(self, identity: dict[str, object], task_id: str) -> dict[str, Any]:
@@ -1520,6 +1793,7 @@ class ImageTaskService:
             all_items = [
                 self._public_task_locked(task) | {"owner_id": _clean(task.get("owner_id"))}
                 for task in self._tasks.values()
+                if _clean(task.get("source")) != "api_child"
             ]
         all_items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         summary = {
@@ -1736,6 +2010,633 @@ class ImageTaskService:
             )
             return self._public_task_locked(self._tasks[key])
 
+    def run_api_generation(
+        self,
+        identity: dict[str, object],
+        payload: dict[str, Any],
+        *,
+        endpoint: str = "/v1/images/generations",
+    ) -> dict[str, Any] | Iterator[dict[str, Any]]:
+        return self._run_api_request(
+            identity,
+            mode="generate",
+            endpoint=endpoint,
+            payload=payload,
+        )
+
+    def run_api_edit(
+        self,
+        identity: dict[str, object],
+        payload: dict[str, Any],
+        *,
+        endpoint: str = "/v1/images/edits",
+    ) -> dict[str, Any] | Iterator[dict[str, Any]]:
+        return self._run_api_request(
+            identity,
+            mode="edit",
+            endpoint=endpoint,
+            payload=payload,
+        )
+
+    async def run_api_generation_async(
+        self,
+        identity: dict[str, object],
+        payload: dict[str, Any],
+        *,
+        endpoint: str = "/v1/images/generations",
+    ) -> dict[str, Any] | AsyncIterator[dict[str, Any]]:
+        return await self._run_api_request_async(
+            identity,
+            mode="generate",
+            endpoint=endpoint,
+            payload=payload,
+        )
+
+    async def run_api_edit_async(
+        self,
+        identity: dict[str, object],
+        payload: dict[str, Any],
+        *,
+        endpoint: str = "/v1/images/edits",
+    ) -> dict[str, Any] | AsyncIterator[dict[str, Any]]:
+        return await self._run_api_request_async(
+            identity,
+            mode="edit",
+            endpoint=endpoint,
+            payload=payload,
+        )
+
+    def _begin_api_request(
+        self,
+        identity: dict[str, object],
+        *,
+        mode: str,
+        endpoint: str,
+        payload: dict[str, Any],
+    ) -> tuple[list[_ApiTaskCompletion], str, bool]:
+        request_payload = dict(payload)
+        request_n = max(1, min(4, _nonnegative_int(request_payload.get("n"), maximum=4) or 1))
+        request_payload["n"] = request_n
+        request_payload["stream"] = False
+        completions = self._enqueue_api_request(
+            identity,
+            mode=mode,
+            endpoint=endpoint,
+            payload=request_payload,
+            request_n=request_n,
+        )
+        return (
+            completions,
+            _clean(payload.get("model"), "gpt-image-2"),
+            bool(payload.get("stream")),
+        )
+
+    def _run_api_request(
+        self,
+        identity: dict[str, object],
+        *,
+        mode: str,
+        endpoint: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | Iterator[dict[str, Any]]:
+        completions, model, stream = self._begin_api_request(
+            identity,
+            mode=mode,
+            endpoint=endpoint,
+            payload=payload,
+        )
+
+        if stream:
+            return self._stream_api_completions(completions, model=model)
+
+        self._wait_api_completions(completions)
+        successful_results = self._successful_api_results_or_raise(completions)
+        return self._aggregate_api_results(successful_results)
+
+    async def _run_api_request_async(
+        self,
+        identity: dict[str, object],
+        *,
+        mode: str,
+        endpoint: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | AsyncIterator[dict[str, Any]]:
+        # Enqueue and persist synchronously; this critical section is short. The
+        # potentially long upstream wait is always event-driven below, so API
+        # callers never occupy Starlette's shared worker pool for minutes.
+        completions, model, stream = self._begin_api_request(
+            identity,
+            mode=mode,
+            endpoint=endpoint,
+            payload=payload,
+        )
+        if stream:
+            return self._stream_api_completions_async(completions, model=model)
+        await self._wait_api_completions_async(completions)
+        successful_results = self._successful_api_results_or_raise(completions)
+        return self._aggregate_api_results(successful_results)
+
+    @staticmethod
+    def _wait_api_completions(completions: list[_ApiTaskCompletion]) -> None:
+        timeout = max(1.0, float(config.image_v1_sync_wait_timeout_secs))
+        _, pending = wait(
+            [completion.future for completion in completions],
+            timeout=timeout,
+            return_when=ALL_COMPLETED,
+        )
+        if pending:
+            raise ImageGenerationError("图片同步等待超时，任务仍在后台继续执行")
+
+    @staticmethod
+    async def _wait_api_completions_async(
+        completions: list[_ApiTaskCompletion],
+    ) -> None:
+        timeout = max(1.0, float(config.image_v1_sync_wait_timeout_secs))
+        wrapped = [asyncio.wrap_future(completion.future) for completion in completions]
+        _, pending = await asyncio.wait(
+            wrapped,
+            timeout=timeout,
+            return_when=asyncio.ALL_COMPLETED,
+        )
+        if pending:
+            raise ImageGenerationError("图片同步等待超时，任务仍在后台继续执行")
+
+    @staticmethod
+    def _successful_api_results_or_raise(
+        completions: list[_ApiTaskCompletion],
+    ) -> list[dict[str, Any]]:
+        successful_results: list[dict[str, Any]] = []
+        first_error: BaseException | None = None
+        for completion in completions:
+            try:
+                result = completion.future.result()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                continue
+            if (
+                isinstance(result, dict)
+                and isinstance(result.get("data"), list)
+                and result["data"]
+            ):
+                successful_results.append(result)
+            elif first_error is None:
+                first_error = RuntimeError("上游未返回有效图片")
+        if first_error is not None or len(successful_results) != len(completions):
+            first_error = first_error or RuntimeError("部分图片子任务未返回有效结果")
+            if len(completions) == 1 and isinstance(first_error, ImageGenerationError):
+                raise first_error
+            error = ImageGenerationError(
+                "一个或多个图片子任务失败，本次请求未完整完成",
+                code="partial_generation_failed",
+            )
+            for attribute in ("account_email", "account_ref", "conversation_id"):
+                value = getattr(first_error, attribute, None)
+                if value:
+                    setattr(error, attribute, value)
+            raise error from first_error
+        return successful_results
+
+    def _stream_api_completions(
+        self,
+        completions: list[_ApiTaskCompletion],
+        *,
+        model: str,
+    ) -> Iterator[dict[str, Any]]:
+        total = len(completions)
+        wait_deadline = time.monotonic() + max(1.0, float(config.image_v1_sync_wait_timeout_secs))
+        future_indexes = {
+            completion.future: index
+            for index, completion in enumerate(completions, start=1)
+        }
+        pending = set(future_indexes)
+        yield {
+            "object": "image.generation.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "index": 1,
+            "total": total,
+            "progress_text": f"0/{total}",
+            "upstream_event_type": "queued",
+            "data": [],
+        }
+        while pending:
+            remaining = wait_deadline - time.monotonic()
+            if remaining <= 0:
+                raise ImageGenerationError("图片同步等待超时，任务仍在后台继续执行")
+            completed, pending = wait(
+                pending,
+                timeout=remaining,
+                return_when=FIRST_COMPLETED,
+            )
+            if not completed:
+                raise ImageGenerationError("图片同步等待超时，任务仍在后台继续执行")
+            for future in sorted(completed, key=future_indexes.__getitem__):
+                index = future_indexes[future]
+                try:
+                    result = future.result()
+                except BaseException:
+                    continue
+                if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+                    continue
+                created = _nonnegative_int(result.get("created")) or int(time.time())
+                for item in result["data"]:
+                    if not isinstance(item, dict):
+                        continue
+                    yield {
+                        "object": "image.generation.result",
+                        "created": created,
+                        "model": model,
+                        "index": index,
+                        "total": total,
+                        "data": [item],
+                    }
+            if pending:
+                yield {
+                    "object": "image.generation.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "index": max(1, total - len(pending)),
+                    "total": total,
+                    "progress_text": f"{total - len(pending)}/{total}",
+                    "upstream_event_type": "child_completed",
+                    "data": [],
+                }
+        self._successful_api_results_or_raise(completions)
+
+    async def _stream_api_completions_async(
+        self,
+        completions: list[_ApiTaskCompletion],
+        *,
+        model: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        total = len(completions)
+        wait_deadline = time.monotonic() + max(
+            1.0,
+            float(config.image_v1_sync_wait_timeout_secs),
+        )
+        future_indexes = {
+            asyncio.wrap_future(completion.future): index
+            for index, completion in enumerate(completions, start=1)
+        }
+        pending = set(future_indexes)
+        yield {
+            "object": "image.generation.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "index": 1,
+            "total": total,
+            "progress_text": f"0/{total}",
+            "upstream_event_type": "queued",
+            "data": [],
+        }
+        while pending:
+            remaining = wait_deadline - time.monotonic()
+            if remaining <= 0:
+                raise ImageGenerationError("图片同步等待超时，任务仍在后台继续执行")
+            completed, pending = await asyncio.wait(
+                pending,
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not completed:
+                raise ImageGenerationError("图片同步等待超时，任务仍在后台继续执行")
+            for future in sorted(completed, key=future_indexes.__getitem__):
+                index = future_indexes[future]
+                try:
+                    result = future.result()
+                except BaseException:
+                    continue
+                if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+                    continue
+                created = _nonnegative_int(result.get("created")) or int(time.time())
+                for item in result["data"]:
+                    if not isinstance(item, dict):
+                        continue
+                    yield {
+                        "object": "image.generation.result",
+                        "created": created,
+                        "model": model,
+                        "index": index,
+                        "total": total,
+                        "data": [item],
+                    }
+            if pending:
+                yield {
+                    "object": "image.generation.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "index": max(1, total - len(pending)),
+                    "total": total,
+                    "progress_text": f"{total - len(pending)}/{total}",
+                    "upstream_event_type": "child_completed",
+                    "data": [],
+                }
+        self._successful_api_results_or_raise(completions)
+
+    @staticmethod
+    def _merge_usage(
+        aggregate: dict[str, Any],
+        usage: dict[str, Any],
+    ) -> None:
+        for key, value in usage.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                aggregate[key] = aggregate.get(key, 0) + value
+            elif isinstance(value, dict):
+                nested = aggregate.get(key)
+                if not isinstance(nested, dict):
+                    nested = {}
+                    aggregate[key] = nested
+                ImageTaskService._merge_usage(nested, value)
+            elif key not in aggregate:
+                aggregate[key] = value
+
+    @staticmethod
+    def _aggregate_api_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+        created_values = [
+            _nonnegative_int(result.get("created"))
+            for result in results
+            if _nonnegative_int(result.get("created"))
+        ]
+        data: list[dict[str, Any]] = []
+        usage: dict[str, Any] = {}
+        account_email = ""
+        for result in results:
+            raw_data = result.get("data")
+            if isinstance(raw_data, list):
+                data.extend(item for item in raw_data if isinstance(item, dict))
+            raw_usage = result.get("usage")
+            if isinstance(raw_usage, dict):
+                ImageTaskService._merge_usage(usage, raw_usage)
+            if not account_email:
+                account_email = _clean(result.get("_account_email") or result.get("account_email"))
+        aggregate: dict[str, Any] = {
+            "created": min(created_values) if created_values else int(time.time()),
+            "data": data,
+        }
+        if usage:
+            aggregate["usage"] = usage
+        if account_email:
+            aggregate["_account_email"] = account_email
+        return aggregate
+
+    def _enqueue_api_request(
+        self,
+        identity: dict[str, object],
+        *,
+        mode: str,
+        endpoint: str,
+        payload: dict[str, Any],
+        request_n: int,
+    ) -> list[_ApiTaskCompletion]:
+        owner = _owner_id(identity)
+        parent_id = f"api-{uuid4().hex}"
+        parent_key = _task_key(owner, parent_id)
+        child_ids = [f"{parent_id}-{index + 1}" for index in range(request_n)]
+        now = _now_iso()
+        now_ts = time.time()
+        response_format = _clean(payload.get("response_format"), "b64_json")
+        prompt = _clean(payload.get("prompt"))[:10_000]
+        model = _clean(payload.get("model"), "gpt-image-2")
+        created_keys: list[str] = []
+        completions: list[_ApiTaskCompletion] = []
+
+        with self._lock:
+            self._cleanup_locked()
+            _, user_limit, queue_capacity, _, effective_global_limit = self._dispatch_limits()
+            projected_pending = self._projected_pending_after_submission_locked(
+                owner,
+                request_n,
+                user_limit=user_limit,
+                effective_global_limit=effective_global_limit,
+            )
+            if projected_pending > queue_capacity:
+                self._queue_rejected_total += 1
+                raise ImageQueueFullError(f"图片任务队列已满（上限 {queue_capacity}），请稍后重试")
+
+            parent = {
+                "id": parent_id,
+                "owner_id": owner,
+                "owner_role": _clean(identity.get("role"), "admin"),
+                "owner_name": _clean(identity.get("name")),
+                "owner_group": _clean(identity.get("group"), "default"),
+                "credit_reserved": False,
+                "project_budget_reserved": False,
+                "status": TASK_STATUS_QUEUED,
+                "mode": "edit" if mode == "edit" else "generate",
+                "source": "api",
+                "endpoint": endpoint,
+                "model": model,
+                "size": _clean(payload.get("size")),
+                "quality": _clean(payload.get("quality"), "auto"),
+                "prompt": prompt,
+                "request_n": request_n,
+                "response_format": response_format,
+                "caller_key_id": _clean(identity.get("id")),
+                "caller_key_name": _clean(identity.get("name")) or _clean(identity.get("id")),
+                "child_task_ids": child_ids,
+                "child_total": request_n,
+                "completed_children": 0,
+                "failed_children": 0,
+                "created_at": now,
+                "updated_at": now,
+                "created_ts": now_ts,
+                "updated_ts": now_ts,
+                "priority": 0,
+                "resume_count": 0,
+                "progress": "queued",
+                "last_checkpoint": "queued",
+                "timeline": [
+                    {
+                        "stage": "api_received",
+                        "status": TASK_STATUS_QUEUED,
+                        "created_at": now,
+                        "created_ts": now_ts,
+                        "detail": f"已接收请求并拆分为 {request_n} 个独立图片任务",
+                    }
+                ],
+            }
+            self._tasks[parent_key] = parent
+            try:
+                created_keys.append(parent_key)
+                records = [parent]
+                for index, child_id in enumerate(child_ids):
+                    child_key = _task_key(owner, child_id)
+                    child_payload = {**payload, "n": 1, "stream": False}
+                    child = {
+                        "id": child_id,
+                        "owner_id": owner,
+                        "owner_role": _clean(identity.get("role"), "admin"),
+                        "owner_name": _clean(identity.get("name")),
+                        "owner_group": _clean(identity.get("group"), "default"),
+                        "credit_reserved": False,
+                        "project_budget_reserved": False,
+                        "status": TASK_STATUS_QUEUED,
+                        "mode": "edit" if mode == "edit" else "generate",
+                        "source": "api_child",
+                        "endpoint": endpoint,
+                        "parent_task_id": parent_id,
+                        "child_index": index,
+                        "child_total": request_n,
+                        "model": model,
+                        "size": _clean(payload.get("size")),
+                        "quality": _clean(payload.get("quality"), "auto"),
+                        "prompt": prompt,
+                        "request_n": 1,
+                        "response_format": response_format,
+                        "created_at": now,
+                        "updated_at": now,
+                        "created_ts": now_ts,
+                        "updated_ts": now_ts,
+                        "priority": 0,
+                        "resume_count": 0,
+                        "last_checkpoint": "queued",
+                        "timeline": [
+                            {
+                                "stage": "queued",
+                                "status": TASK_STATUS_QUEUED,
+                                "created_at": now,
+                                "created_ts": now_ts,
+                                "detail": f"图片 {index + 1}/{request_n} 已进入统一队列",
+                            }
+                        ],
+                    }
+                    self._tasks[child_key] = child
+                    records.append(child)
+                    created_keys.append(child_key)
+                    attempt = threading.Event()
+                    completion = _ApiTaskCompletion(parent_key=parent_key)
+                    completions.append(completion)
+                    self._api_completions[child_key] = completion
+                    self._active_attempts[child_key] = attempt
+                    self._enqueue_work_locked(_QueuedImageWork(
+                        key=child_key,
+                        owner_id=owner,
+                        task_id=child_id,
+                        attempt=attempt,
+                        runner=self._run_task,
+                        args=(
+                            child_key,
+                            child_id,
+                            mode,
+                            child_payload,
+                            dict(identity),
+                            model,
+                            False,
+                            attempt,
+                        ),
+                        identity=dict(identity),
+                        credit_reserved=False,
+                    ))
+                self.store.upsert_many(records)
+            except Exception:
+                for key in created_keys:
+                    self._remove_pending_work_locked(key)
+                    self._active_attempts.pop(key, None)
+                    self._api_completions.pop(key, None)
+                    self._tasks.pop(key, None)
+                raise
+
+            self._dispatch_locked()
+            return completions
+
+    def _signal_api_completion_locked(
+        self,
+        key: str,
+        *,
+        result: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        completion = self._api_completions.pop(key, None)
+        if completion is None:
+            return
+        try:
+            self._refresh_api_parent_locked(completion.parent_key)
+        except Exception:
+            # A persistence/monitoring failure must not strand an already
+            # completed upstream request until the HTTP wait timeout.
+            module_logger.exception("failed to refresh API parent for %s", key)
+        if completion.future.done():
+            return
+        if error is not None:
+            completion.future.set_exception(error)
+        else:
+            completion.future.set_result(result or {})
+
+    def _refresh_api_parent_locked(self, parent_key: str) -> None:
+        parent = self._tasks.get(parent_key)
+        if parent is None or _clean(parent.get("source")) != "api":
+            return
+        owner = _clean(parent.get("owner_id"))
+        children = [
+            self._tasks.get(_task_key(owner, _clean(child_id)))
+            for child_id in parent.get("child_task_ids") or []
+        ]
+        children = [child for child in children if child is not None]
+        if not children:
+            return
+        successful = [child for child in children if child.get("status") == TASK_STATUS_SUCCESS]
+        failed = [child for child in children if child.get("status") == TASK_STATUS_ERROR]
+        finished = len(successful) + len(failed)
+        updates: dict[str, Any] = {
+            "completed_children": len(successful),
+            "failed_children": len(failed),
+            "progress": f"{finished}/{len(children)}",
+        }
+        if any(child.get("status") == TASK_STATUS_RUNNING for child in children) or finished:
+            updates["status"] = TASK_STATUS_RUNNING
+            updates["last_checkpoint"] = "upstream_running"
+            started_values = [
+                float(child["started_ts"])
+                for child in children
+                if isinstance(child.get("started_ts"), (int, float))
+            ]
+            if started_values:
+                updates["started_ts"] = min(started_values)
+        else:
+            updates["status"] = TASK_STATUS_QUEUED
+
+        if finished == len(children):
+            aggregate = self._aggregate_api_results(successful) if successful else {"data": []}
+            data = aggregate["data"]
+            usage = aggregate.get("usage", {})
+            duration_ms = int(max(0.0, time.time() - _task_created_timestamp(parent)) * 1_000)
+            if successful and not failed:
+                result_count = sum(
+                    _nonnegative_int(child.get("result_count"), maximum=4)
+                    for child in successful
+                )
+                updates.update({
+                    "status": TASK_STATUS_SUCCESS,
+                    "data": data,
+                    "result_count": result_count,
+                    "usage": usage,
+                    "error": "",
+                    "error_code": "",
+                    "duration_ms": duration_ms,
+                    "last_checkpoint": "completed",
+                })
+            else:
+                first_failure = failed[0]
+                result_count = sum(
+                    _nonnegative_int(child.get("result_count"), maximum=4)
+                    for child in successful
+                )
+                updates.update({
+                    "status": TASK_STATUS_ERROR,
+                    "data": data,
+                    "result_count": result_count,
+                    "error": _clean(first_failure.get("error"), "图片调用失败"),
+                    "error_code": (
+                        "partial_generation_failed"
+                        if successful
+                        else _clean(first_failure.get("error_code"), "upstream_error")
+                    ),
+                    "duration_ms": duration_ms,
+                    "last_checkpoint": "failed",
+                })
+        self._update_task(parent_key, **updates)
+
     def _submit(
         self,
         identity: dict[str, object],
@@ -1895,6 +2796,7 @@ class ImageTaskService:
         attempt: threading.Event,
     ) -> None:
         started = time.time()
+        postprocess_slot_acquired = False
         # 创建进度回调，每个步骤完成后更新任务状态
         def progress_callback(step: str) -> None:
             updates: dict[str, Any] = {"progress": step}
@@ -1951,9 +2853,18 @@ class ImageTaskService:
                     retry_prompt="",
                     last_checkpoint="completed",
                 )
+                self._signal_api_completion_locked(key, result=result)
                 completed_task = dict(self._tasks.get(key) or {})
-                if credit_reserved and self._consume_credit(identity, task_id):
-                    self._clear_credit_reserved_flag(key)
+            self._acquire_postprocess_slot()
+            postprocess_slot_acquired = True
+            self._release_running_slot(key, _owner_id(identity))
+            if credit_reserved:
+                self._settle_credit_once(
+                    key,
+                    identity,
+                    task_id,
+                    success=True,
+                )
             if completed_task:
                 self._settle_project_budget_once(
                     key,
@@ -2034,9 +2945,19 @@ class ImageTaskService:
                     **({"conversation_id": conversation_id} if conversation_id else {}),
                     **({"account_ref": account_ref} if conversation_id and account_ref else {}),
                 )
-                if credit_reserved and self._refund_credit(identity, task_id):
-                    self._clear_credit_reserved_flag(key)
+                self._signal_api_completion_locked(key, error=exc)
                 failed_task = dict(self._tasks.get(key) or {})
+            if not postprocess_slot_acquired:
+                self._acquire_postprocess_slot()
+                postprocess_slot_acquired = True
+            self._release_running_slot(key, _owner_id(identity))
+            if credit_reserved:
+                self._settle_credit_once(
+                    key,
+                    identity,
+                    task_id,
+                    success=False,
+                )
             self._settle_project_budget_once(key, identity, task_id, success=False)
             workflow = failed_task.get("workflow") if isinstance(failed_task.get("workflow"), dict) else {}
             workspace_conversation_id = _clean(workflow.get("conversation_id")) if isinstance(workflow, dict) else ""
@@ -2070,6 +2991,8 @@ class ImageTaskService:
                 account_email=account_email,
             )
         finally:
+            if postprocess_slot_acquired:
+                self._release_postprocess_slot()
             with self._lock:
                 if self._active_attempts.get(key) is attempt:
                     self._active_attempts.pop(key, None)
@@ -2128,6 +3051,13 @@ class ImageTaskService:
             if not self._is_active_attempt_locked(key, attempt):
                 return False
             self._update_task(key, **updates)
+            task = self._tasks.get(key) or {}
+            if _clean(task.get("source")) == "api_child":
+                parent_id = _clean(task.get("parent_task_id"))
+                if parent_id:
+                    self._refresh_api_parent_locked(
+                        _task_key(_clean(task.get("owner_id")), parent_id)
+                    )
             return True
 
     def _update_task(self, key: str, **updates: Any) -> None:
@@ -2219,6 +3149,24 @@ class ImageTaskService:
             }
             if item.get("request_n") is not None:
                 task["request_n"] = max(1, min(4, _nonnegative_int(item.get("request_n"), maximum=4) or 1))
+            parent_task_id = _clean(item.get("parent_task_id"))
+            if parent_task_id:
+                task["parent_task_id"] = parent_task_id
+            child_task_ids = item.get("child_task_ids")
+            if isinstance(child_task_ids, list):
+                task["child_task_ids"] = [
+                    _clean(child_id) for child_id in child_task_ids if _clean(child_id)
+                ][:4]
+            if item.get("child_index") is not None:
+                task["child_index"] = _nonnegative_int(item.get("child_index"), maximum=3)
+            if item.get("child_total") is not None:
+                task["child_total"] = _nonnegative_int(item.get("child_total"), maximum=4)
+                task["completed_children"] = _nonnegative_int(
+                    item.get("completed_children"), maximum=4
+                )
+                task["failed_children"] = _nonnegative_int(
+                    item.get("failed_children"), maximum=4
+                )
             if item.get("response_format"):
                 task["response_format"] = _clean(item.get("response_format"))
             if item.get("caller_key_id"):
@@ -2280,6 +3228,17 @@ class ImageTaskService:
             status = task.get("status")
             if status not in {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING}:
                 continue
+            if _clean(task.get("source")) in {"api", "api_child"}:
+                self._update_task(
+                    key,
+                    status=TASK_STATUS_ERROR,
+                    error="服务已重启，未完成的同步 API 图片任务已中断，请重新提交",
+                    error_code="service_restarted",
+                    last_checkpoint="recovery_compensated",
+                    recovery_detail="synchronous_api_request_cannot_resume",
+                )
+                changed = True
+                continue
             try:
                 if status == TASK_STATUS_RUNNING:
                     work = self._rebuild_resume_work(task)
@@ -2333,16 +3292,18 @@ class ImageTaskService:
                 "id": _clean(task.get("owner_id")),
                 "role": _clean(task.get("owner_role"), "user"),
             }
+            if _clean(task.get("owner_name")):
+                identity["name"] = _clean(task.get("owner_name"))
             task_id = _clean(task.get("id"))
             task_changed = False
             if task.get("credit_reserved"):
-                settled = (
-                    self._consume_credit(identity, task_id)
-                    if task.get("status") == TASK_STATUS_SUCCESS
-                    else self._refund_credit(identity, task_id)
+                settled = self._settle_credit_once(
+                    key,
+                    identity,
+                    task_id,
+                    success=task.get("status") == TASK_STATUS_SUCCESS,
                 )
                 if settled:
-                    task["credit_reserved"] = False
                     task_changed = True
             if task.get("project_budget_reserved"):
                 project_settled = self._settle_project_budget_once(
@@ -2379,6 +3340,38 @@ class ImageTaskService:
                 "failed to persist project budget settlement flag: %s",
                 type(exc).__name__,
             )
+
+    def _settle_credit_once(
+        self,
+        key: str,
+        identity: dict[str, object],
+        task_id: str,
+        *,
+        success: bool,
+    ) -> bool:
+        """Claim one terminal user-credit settlement across workers and readers."""
+        with self._lock:
+            task = self._tasks.get(key)
+            if (
+                task is None
+                or not task.get("credit_reserved")
+                or key in self._credit_settlements
+            ):
+                return False
+            self._credit_settlements.add(key)
+        settled = False
+        try:
+            settled = (
+                self._consume_credit(identity, task_id)
+                if success
+                else self._refund_credit(identity, task_id)
+            )
+            return settled
+        finally:
+            with self._lock:
+                if settled:
+                    self._clear_credit_reserved_flag(key)
+                self._credit_settlements.discard(key)
 
     def _settle_project_budget_once(
         self,

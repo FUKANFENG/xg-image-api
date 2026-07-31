@@ -83,8 +83,11 @@ class ImageTaskRecoveryTests(unittest.TestCase):
         while task["status"] not in {"success", "error"} and time.time() < deadline:
             time.sleep(0.02)
             task = service.get_task(identity, "queued-1")
+        while service._active_attempts and time.time() < deadline:
+            time.sleep(0.02)
 
         self.assertEqual(task["status"], "success")
+        self.assertEqual(service._active_attempts, {})
         self.assertEqual(credits.consumed, ["queued-1"])
         self.assertEqual(credits.refunded, [])
         stages = [item["stage"] for item in task["timeline"]]

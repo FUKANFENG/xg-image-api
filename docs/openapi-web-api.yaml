@@ -53,7 +53,7 @@ paths:
       description: |
         使用 `auto` 或文字模型时执行文字/看图对话。
         使用 `gpt-image-2` 时会转为图片生成，图片以 Markdown Data URL
-        写入 assistant message；业务图片编辑优先使用 `/v1/images/edits`。
+        写入 assistant message，并进入统一图片任务队列；业务图片编辑优先使用 `/v1/images/edits`。
       requestBody:
         required: true
         content:
@@ -86,7 +86,7 @@ paths:
       summary: ChatGPT Web Responses 兼容调用
       description: |
         支持文字、看图和 `image_generation` 图片工具。
-        图片工具必须使用 `gpt-image-2` 才能确保进入 Web 生图链路。
+        图片工具必须使用 `gpt-image-2` 才能确保进入 Web 生图链路和统一图片任务队列。
       requestBody:
         required: true
         content:
@@ -120,6 +120,7 @@ paths:
       description: |
         只允许文档化的 Web 图片模型 `gpt-image-2`。
         `stream=true` 时返回图片进度和最终结果 SSE。
+        `n=2-4` 会拆分为独立子任务；任一子任务失败时整体请求返回失败。
       requestBody:
         required: true
         content:
@@ -151,6 +152,7 @@ paths:
       description: |
         支持 multipart 文件、JSON Data URL、Base64 和公网图片 URL。
         图片模型固定为 `gpt-image-2`。
+        所有图片请求与网页异步生图共享统一队列及账号槽位。
       requestBody:
         required: true
         content:

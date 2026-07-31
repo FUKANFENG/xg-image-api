@@ -26,15 +26,14 @@ class ImageEditsJsonApiTests(unittest.TestCase):
             self.calls.append(payload)
             return {"created": 1, "data": [{"b64_json": "ZmFrZQ=="}]}
 
-        self.handle_patcher = mock.patch.object(ai_module.openai_v1_image_edit, "handle", fake_handle)
         self.filter_patcher = mock.patch.object(ai_module, "filter_or_log", mock.AsyncMock())
         self.task_tracker = mock.Mock()
-        self.task_tracker.begin_api_call.return_value = {"id": "api-edit-json-test"}
+        self.task_tracker.run_api_edit_async = mock.AsyncMock(
+            side_effect=lambda _identity, payload: fake_handle(payload)
+        )
         self.task_tracker_patcher = mock.patch.object(ai_module, "image_task_service", self.task_tracker)
-        self.handle_patcher.start()
         self.filter_patcher.start()
         self.task_tracker_patcher.start()
-        self.addCleanup(self.handle_patcher.stop)
         self.addCleanup(self.filter_patcher.stop)
         self.addCleanup(self.task_tracker_patcher.stop)
 

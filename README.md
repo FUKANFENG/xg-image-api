@@ -128,6 +128,8 @@ environment:
 - `GET /v1/models` 返回 `gpt-image-2`、`codex-gpt-image-2`、`auto`、`gpt-5`、`gpt-5-1`、`gpt-5-2`、`gpt-5-3`、`gpt-5-3-mini`、
   `gpt-5-mini`
 - 支持通过 `n` 返回多张生成结果
+- Fast Scheduler V2 统一网页异步生图、`/v1/images/*`、Chat 图片请求与 Responses 图片工具；`n=1-4` 拆分为独立子任务，并按一个父任务聚合展示
+- 支持预测完成时间选账号、自适应 2–5 秒轮询、账号并发快速恢复、事件驱动即时补位与任务优先级老化
 - 支持生成可编辑 PPT 文件
 - 支持生成可编辑 PSD 文件
 - 支持 Codex 中的画图接口逆向，仅 `Plus` / `Team` / `Pro` 订阅可用，模型别名为 `codex-gpt-image-2`，如有需要可自行在其他场景映射回
@@ -214,6 +216,8 @@ curl http://localhost:18080/v1/models \
 <br>
 
 OpenAI 兼容图片生成接口，用于文生图。
+
+该接口会进入统一生图队列；`n=2-4` 会拆成独立子任务，最终仍返回一个聚合响应。可在 `/api-tasks` 查看统一父任务的排队、生成和结果状态。
 
 ```bash
 curl http://localhost:18080/v1/images/generations \

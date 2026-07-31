@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, AsyncIterable, AsyncIterator, Callable
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR
 from services.protocol.error_response import anthropic_error_response, openai_error_response
-from utils.helper import anthropic_sse_stream, sse_json_stream
+from utils.helper import anthropic_sse_stream, async_sse_json_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
@@ -239,6 +239,17 @@ def _next_item(items):
         return False, None
 
 
+async def _prepend_async(first: object, items: AsyncIterable[object]) -> AsyncIterator[object]:
+    yield first
+    async for item in items:
+        yield item
+
+
+async def _empty_async() -> AsyncIterator[object]:
+    if False:
+        yield None
+
+
 @dataclass
 class LoggedCall:
     identity: dict[str, object]
@@ -291,7 +302,9 @@ class LoggedCall:
         except Exception as exc:
             self.notify_failure(exc)
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
-            if self.endpoint.startswith("/v1/images"):
+            if self.endpoint.startswith("/v1/images") or (
+                hasattr(exc, "to_openai_error") and hasattr(exc, "status_code")
+            ):
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
 
@@ -317,7 +330,9 @@ class LoggedCall:
         except Exception as exc:
             self.notify_failure(exc)
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
-            if self.endpoint.startswith("/v1/images"):
+            if self.endpoint.startswith("/v1/images") or (
+                hasattr(exc, "to_openai_error") and hasattr(exc, "status_code")
+            ):
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
         if not has_first:
@@ -325,6 +340,91 @@ class LoggedCall:
             self.log("流式调用结束")
             return StreamingResponse(sender(()), media_type="text/event-stream")
         return StreamingResponse(sender(self.stream(itertools.chain([first], result))), media_type="text/event-stream")
+
+    async def run_async(self, handler, *args):
+        """Run an async image request without occupying the shared AnyIO pool."""
+        from services.protocol.conversation import ImageGenerationError
+
+        try:
+            result = await handler(*args)
+        except ImageGenerationError as exc:
+            self.notify_failure(exc)
+            self.log(
+                "调用失败",
+                status="failed",
+                error=str(exc),
+                account_email=getattr(exc, "account_email", ""),
+                conversation_id=getattr(exc, "conversation_id", ""),
+            )
+            return _image_error_response(exc)
+        except HTTPException as exc:
+            self.notify_failure(exc)
+            self.log("调用失败", status="failed", error=str(exc.detail))
+            raise
+        except Exception as exc:
+            self.notify_failure(exc)
+            self.log(
+                "调用失败",
+                status="failed",
+                error=str(exc),
+                account_email=getattr(exc, "account_email", ""),
+            )
+            if self.endpoint.startswith("/v1/images") or (
+                hasattr(exc, "to_openai_error") and hasattr(exc, "status_code")
+            ):
+                return _image_error_response(exc)
+            return _protocol_error_response(exc, 502, "openai")
+
+        if isinstance(result, dict):
+            self._notify_success(result)
+            self.log("调用完成", result)
+            response = dict(result)
+            response.pop("_account_email", None)
+            return response
+
+        iterator = result.__aiter__()
+        try:
+            first = await anext(iterator)
+        except StopAsyncIteration:
+            self._notify_success({"data": []})
+            self.log("流式调用结束")
+            return StreamingResponse(
+                async_sse_json_stream(_empty_async()),
+                media_type="text/event-stream",
+            )
+        except ImageGenerationError as exc:
+            self.notify_failure(exc)
+            self.log(
+                "调用失败",
+                status="failed",
+                error=str(exc),
+                account_email=getattr(exc, "account_email", ""),
+                conversation_id=getattr(exc, "conversation_id", ""),
+            )
+            return _image_error_response(exc)
+        except HTTPException as exc:
+            self.notify_failure(exc)
+            self.log("调用失败", status="failed", error=str(exc.detail))
+            raise
+        except Exception as exc:
+            self.notify_failure(exc)
+            self.log(
+                "调用失败",
+                status="failed",
+                error=str(exc),
+                account_email=getattr(exc, "account_email", ""),
+            )
+            if self.endpoint.startswith("/v1/images") or (
+                hasattr(exc, "to_openai_error") and hasattr(exc, "status_code")
+            ):
+                return _image_error_response(exc)
+            return _protocol_error_response(exc, 502, "openai")
+        return StreamingResponse(
+            async_sse_json_stream(
+                self.stream_async(_prepend_async(first, iterator))
+            ),
+            media_type="text/event-stream",
+        )
 
     def stream(self, items):
         urls: list[str] = []
@@ -358,6 +458,52 @@ class LoggedCall:
                 self._notify_success({"data": [{"url": url} for url in list(dict.fromkeys(urls))]})
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
                          conversation_id=conversation_ids[0] if conversation_ids else "")
+
+    async def stream_async(
+        self,
+        items: AsyncIterable[object],
+    ) -> AsyncIterator[object]:
+        urls: list[str] = []
+        account_emails: list[str] = []
+        conversation_ids: list[str] = []
+        failed = False
+        try:
+            async for item in items:
+                urls.extend(_collect_urls(item))
+                account_emails.extend(_collect_account_emails(item))
+                conversation_ids.extend(_collect_conversation_ids(item))
+                yield _strip_internal_response_fields(item)
+        except Exception as exc:
+            failed = True
+            self.notify_failure(exc)
+            self.log(
+                "流式调用失败",
+                status="failed",
+                error=str(exc),
+                urls=urls,
+                account_email=(
+                    account_emails[0]
+                    if account_emails
+                    else getattr(exc, "account_email", "")
+                ),
+                conversation_id=(
+                    conversation_ids[0]
+                    if conversation_ids
+                    else getattr(exc, "conversation_id", "")
+                ),
+            )
+            raise
+        finally:
+            if not failed:
+                self._notify_success({
+                    "data": [{"url": url} for url in list(dict.fromkeys(urls))]
+                })
+                self.log(
+                    "流式调用结束",
+                    urls=urls,
+                    account_email=account_emails[0] if account_emails else "",
+                    conversation_id=conversation_ids[0] if conversation_ids else "",
+                )
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
             urls: list[str] | None = None, account_email: str = "", conversation_id: str = "") -> None:

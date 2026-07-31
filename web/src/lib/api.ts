@@ -20,6 +20,12 @@ export type ImageRuntimeMetrics = {
     available_dispatch_slots?: number;
     borrowed_user_slots?: number;
     work_conserving?: boolean;
+    scheduler_mode?: string;
+    phases?: {
+      submitting: number;
+      remote_running: number;
+      polling: number;
+    };
     slot_utilization_percent?: number;
     active_users: number;
     rejected_total: number;
@@ -30,6 +36,11 @@ export type ImageRuntimeMetrics = {
     p95_secs: number;
     throughput_per_minute: number;
     estimated_task_secs: number;
+    queue_wait_p50_ms?: number;
+    queue_wait_p95_ms?: number;
+    slot_handoff_p50_ms?: number;
+    slot_handoff_p95_ms?: number;
+    slot_handoff_samples?: number;
   };
   tasks: Record<string, number> & { total: number };
   errors: Record<string, number>;
@@ -61,6 +72,8 @@ export type ImageRuntimeMetrics = {
       health_level: "healthy" | "warning" | "critical";
       consecutive_failures: number;
       last_failure_kind: string;
+      predicted_finish_ms?: number;
+      scheduler_rank?: number;
     }>;
   };
   user_quotas: { users: number; remaining: number; used: number };
@@ -442,6 +455,9 @@ export type ImageTask = {
   data?: ImageTaskImage[];
   result_count?: number;
   request_n?: number;
+  child_total?: number;
+  completed_children?: number;
+  failed_children?: number;
   response_format?: string;
   caller_key_id?: string;
   caller_key_name?: string;

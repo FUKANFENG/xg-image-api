@@ -125,6 +125,12 @@ export function ApiTaskCard({ task, onSelect }: ApiTaskCardProps) {
           <span className="text-xs text-stone-400">
             {task.mode === "edit" ? "图片编辑" : "文生图"}
           </span>
+          {task.child_total && task.child_total > 1 ? (
+            <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-semibold text-violet-700 dark:bg-violet-400/10 dark:text-violet-300">
+              子任务 {task.completed_children || 0}/{task.child_total}
+              {task.failed_children ? ` · 失败 ${task.failed_children}` : ""}
+            </span>
+          ) : null}
           <span className="font-mono text-[11px] text-stone-400">
             {shortImageTaskId(task.id)}
           </span>
@@ -173,9 +179,13 @@ export function ApiTaskCard({ task, onSelect }: ApiTaskCardProps) {
             </dd>
           </div>
           <div className="min-w-0">
-            <dt className="text-stone-400">结果</dt>
+            <dt className="text-stone-400">
+              {task.child_total && task.child_total > 1 ? "子任务" : "结果"}
+            </dt>
             <dd className="mt-1 font-semibold text-stone-700 dark:text-stone-200">
-              {images.length || task.result_count || 0} 张
+              {task.child_total && task.child_total > 1
+                ? `${task.completed_children || 0}/${task.child_total}`
+                : `${images.length || task.result_count || 0} 张`}
             </dd>
           </div>
           <div className="min-w-0">

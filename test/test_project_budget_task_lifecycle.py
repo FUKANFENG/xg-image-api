@@ -41,6 +41,15 @@ def wait_for_terminal(service: ImageTaskService, task_id: str) -> dict[str, obje
     raise AssertionError("task did not finish")
 
 
+def wait_for_idle(service: ImageTaskService) -> None:
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        if service._running_total == 0 and not service._active_attempts:
+            return
+        time.sleep(0.02)
+    raise AssertionError("task worker did not release its resources")
+
+
 class ProjectBudgetTaskLifecycleTests(unittest.TestCase):
     def test_success_consumes_project_budget_once(self):
         with tempfile.TemporaryDirectory() as root:
@@ -73,6 +82,7 @@ class ProjectBudgetTaskLifecycleTests(unittest.TestCase):
                     workflow={"project_id": "project-1"},
                 )
                 task = wait_for_terminal(service, "budget-success")
+                wait_for_idle(service)
 
             self.assertEqual(task["status"], "success")
             reserve.assert_called_once_with(OWNER, "project-1", "budget-success")
@@ -111,6 +121,7 @@ class ProjectBudgetTaskLifecycleTests(unittest.TestCase):
                     workflow={"project_id": "project-1"},
                 )
                 task = wait_for_terminal(service, "budget-failure")
+                wait_for_idle(service)
 
             self.assertEqual(task["status"], "error")
             consume.assert_not_called()

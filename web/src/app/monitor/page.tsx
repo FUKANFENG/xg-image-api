@@ -205,6 +205,11 @@ function MonitorContent() {
     0;
   const borrowedUserSlots = metrics?.queue.borrowed_user_slots ?? 0;
   const accountSlotCapacity = metrics?.queue.account_slot_capacity;
+  const phases = metrics?.queue.phases ?? {
+    submitting: 0,
+    remote_running: 0,
+    polling: 0,
+  };
   const slotPercent = metrics?.accounts.total_slots
     ? Math.round(
         (metrics.accounts.used_slots / metrics.accounts.total_slots) * 100,
@@ -265,7 +270,7 @@ function MonitorContent() {
             <MetricCard
               label="正在生成"
               value={`${metrics.queue.running} / ${effectiveGlobalConcurrency}`}
-              detail={`基础份额 ${metrics.queue.per_user_concurrency} · 借用 ${borrowedUserSlots} · 账号槽位 ${accountSlotCapacity ?? "--"}`}
+              detail={`提交 ${phases.submitting} · 远程 ${phases.remote_running} · 轮询 ${phases.polling}`}
               icon={Activity}
             />
             <MetricCard
@@ -278,13 +283,13 @@ function MonitorContent() {
             <MetricCard
               label="平均耗时"
               value={`${metrics.analytics.summary.average_duration_secs}s`}
-              detail={`P50 ${metrics.performance.p50_secs}s · P95 ${metrics.performance.p95_secs}s`}
+              detail={`生成 P95 ${metrics.performance.p95_secs}s · 排队 P95 ${metrics.performance.queue_wait_p95_ms ?? 0}ms`}
               icon={Clock3}
             />
             <MetricCard
               label="分钟吞吐"
               value={`${metrics.performance.throughput_per_minute}`}
-              detail={`预计单任务 ${metrics.performance.estimated_task_secs}s`}
+              detail={`补位 P95 ${metrics.performance.slot_handoff_p95_ms ?? 0}ms · 槽位 ${accountSlotCapacity ?? "--"} · 借用 ${borrowedUserSlots}`}
               icon={Server}
             />
             <MetricCard
@@ -505,6 +510,7 @@ function MonitorContent() {
                       <th className="px-3 py-2.5 font-medium">健康度</th>
                       <th className="px-3 py-2.5 font-medium">链路</th>
                       <th className="px-3 py-2.5 font-medium">槽位</th>
+                      <th className="px-3 py-2.5 font-medium">预计完成</th>
                       <th className="px-3 py-2.5 font-medium">成功率</th>
                       <th className="px-3 py-2.5 font-medium">平均耗时</th>
                       <th className="px-3 py-2.5 font-medium">连续失败</th>
@@ -536,6 +542,16 @@ function MonitorContent() {
                         </td>
                         <td className="px-3 py-3 tabular-nums text-stone-700 dark:text-stone-200">
                           {account.inflight}/{account.concurrency_limit}
+                        </td>
+                        <td className="px-3 py-3 tabular-nums text-stone-500">
+                          {account.predicted_finish_ms
+                            ? `${Math.round(account.predicted_finish_ms / 1000)}s`
+                            : "--"}
+                          {account.scheduler_rank ? (
+                            <span className="ml-1 text-xs text-stone-400">
+                              #{account.scheduler_rank}
+                            </span>
+                          ) : null}
                         </td>
                         <td className="px-3 py-3 tabular-nums text-stone-500">
                           {account.success_rate === null
@@ -576,7 +592,7 @@ function MonitorContent() {
                     {!accounts.length ? (
                       <tr>
                         <td
-                          colSpan={8}
+                          colSpan={9}
                           className="px-4 py-10 text-center text-stone-400"
                         >
                           暂无账号运行数据

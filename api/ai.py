@@ -20,8 +20,6 @@ from services.prompt_enhancement_service import (
 from services.protocol import (
     anthropic_v1_messages,
     openai_v1_chat_complete,
-    openai_v1_image_edit,
-    openai_v1_image_generations,
     openai_v1_models,
     openai_v1_response,
     openai_search,
@@ -89,6 +87,53 @@ async def filter_or_log(call: LoggedCall, text: str) -> None:
         raise
 
 
+async def run_scheduled_chat_image(
+    identity: dict[str, object],
+    payload: dict[str, object],
+):
+    mode, image_payload = openai_v1_chat_complete.image_scheduler_payload(payload)
+    if mode == "edit":
+        result = await image_task_service.run_api_edit_async(
+            identity,
+            image_payload,
+            endpoint="/v1/chat/completions",
+        )
+    else:
+        result = await image_task_service.run_api_generation_async(
+            identity,
+            image_payload,
+            endpoint="/v1/chat/completions",
+        )
+    if payload.get("stream"):
+        return openai_v1_chat_complete.stream_scheduled_image_chat_completion(
+            result,
+            str(image_payload["model"]),
+        )
+    return openai_v1_chat_complete.image_chat_response_from_result(payload, result)
+
+
+async def run_scheduled_response_image(
+    identity: dict[str, object],
+    payload: dict[str, object],
+):
+    mode, image_payload = openai_v1_response.response_image_scheduler_payload(payload)
+    if mode == "edit":
+        result = await image_task_service.run_api_edit_async(
+            identity,
+            image_payload,
+            endpoint="/v1/responses",
+        )
+    else:
+        result = await image_task_service.run_api_generation_async(
+            identity,
+            image_payload,
+            endpoint="/v1/responses",
+        )
+    if payload.get("stream"):
+        return openai_v1_response.stream_scheduled_image_response(result, payload)
+    return openai_v1_response.response_image_from_result(payload, result)
+
+
 def create_router() -> APIRouter:
     router = APIRouter()
 
@@ -122,39 +167,19 @@ def create_router() -> APIRouter:
         identity = require_admin(authorization)
         payload = body.model_dump(mode="python")
         payload["base_url"] = resolve_image_base_url(request)
-        tracked_identity = dict(identity)
-        task = await run_in_threadpool(
-            image_task_service.begin_api_call,
-            tracked_identity,
-            mode="generate",
-            endpoint="/v1/images/generations",
-            prompt=body.prompt,
-            model=body.model,
-            size=body.size,
-            quality=body.quality,
-            request_n=body.n,
-            response_format=body.response_format,
-        )
-        task_id = str(task["id"])
         call = LoggedCall(
             identity,
             "/v1/images/generations",
             body.model,
             "文生图",
             request_text=body.prompt,
-            success_callback=lambda result: image_task_service.complete_api_call(
-                tracked_identity, task_id, result
-            ),
-            error_callback=lambda error: image_task_service.fail_api_call(
-                tracked_identity, task_id, error
-            ),
         )
-        try:
-            await filter_or_log(call, body.prompt)
-            return await call.run(openai_v1_image_generations.handle, payload)
-        except Exception as exc:
-            call.notify_failure(exc)
-            raise
+        await filter_or_log(call, body.prompt)
+        return await call.run_async(
+            image_task_service.run_api_generation_async,
+            dict(identity),
+            payload,
+        )
 
     @router.post("/v1/images/edits")
     async def edit_images(
@@ -165,43 +190,23 @@ def create_router() -> APIRouter:
         payload, image_sources, mask_sources = await parse_image_edit_request(request)
         prompt = str(payload["prompt"])
         model = str(payload["model"])
-        tracked_identity = dict(identity)
-        task = await run_in_threadpool(
-            image_task_service.begin_api_call,
-            tracked_identity,
-            mode="edit",
-            endpoint="/v1/images/edits",
-            prompt=prompt,
-            model=model,
-            size=payload.get("size"),
-            quality=str(payload.get("quality") or "auto"),
-            request_n=int(payload.get("n") or 1),
-            response_format=str(payload.get("response_format") or "b64_json"),
-        )
-        task_id = str(task["id"])
         call = LoggedCall(
             identity,
             "/v1/images/edits",
             model,
             "图生图",
             request_text=prompt,
-            success_callback=lambda result: image_task_service.complete_api_call(
-                tracked_identity, task_id, result
-            ),
-            error_callback=lambda error: image_task_service.fail_api_call(
-                tracked_identity, task_id, error
-            ),
         )
-        try:
-            await filter_or_log(call, prompt)
-            payload["images"] = await read_image_sources(image_sources)
-            if mask_sources:
-                payload["mask"] = await read_image_sources(mask_sources)
-            payload["base_url"] = resolve_image_base_url(request)
-            return await call.run(openai_v1_image_edit.handle, payload)
-        except Exception as exc:
-            call.notify_failure(exc)
-            raise
+        await filter_or_log(call, prompt)
+        payload["images"] = await read_image_sources(image_sources)
+        if mask_sources:
+            payload["mask"] = await read_image_sources(mask_sources)
+        payload["base_url"] = resolve_image_base_url(request)
+        return await call.run_async(
+            image_task_service.run_api_edit_async,
+            dict(identity),
+            payload,
+        )
 
     @router.post("/v1/chat/completions")
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
@@ -209,15 +214,22 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("prompt"), payload.get("messages"))
+        image_request = openai_v1_chat_complete.is_image_chat_request(payload)
         call = LoggedCall(
             identity,
             "/v1/chat/completions",
             model,
-            "文本生成",
+            "对话生图" if image_request else "文本生成",
             request_text=request_preview,
             request_shape=request_shape(payload.get("messages")),
         )
         await filter_or_log(call, request_preview)
+        if image_request:
+            return await call.run_async(
+                run_scheduled_chat_image,
+                dict(identity),
+                payload,
+            )
         return await call.run(openai_v1_chat_complete.handle, payload)
 
     @router.post("/v1/responses")
@@ -226,15 +238,22 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("input"), payload.get("instructions"))
+        image_request = not openai_v1_response.is_text_response_request(payload)
         call = LoggedCall(
             identity,
             "/v1/responses",
             model,
-            "Responses",
+            "Responses 生图" if image_request else "Responses",
             request_text=request_preview,
             request_shape=request_shape(payload.get("input")),
         )
         await filter_or_log(call, request_preview)
+        if image_request:
+            return await call.run_async(
+                run_scheduled_response_image,
+                dict(identity),
+                payload,
+            )
         return await call.run(openai_v1_response.handle, payload)
 
     @router.post("/v1/messages")

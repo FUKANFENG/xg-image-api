@@ -98,6 +98,21 @@ FILE_ID_RE = re.compile(r"\b(file[-_](?!service\b)[A-Za-z0-9_-]+)\b")
 REAL_IMAGE_FILE_ID_RE = re.compile(r"\bfile_00000000[a-f0-9]{24}\b")
 SEDIMENT_ID_RE = re.compile(r"sediment://([A-Za-z0-9_-]+)")
 IMAGE_POLL_SETTLE_SECS = 2.0
+
+
+def image_poll_interval_for_elapsed(
+    elapsed_secs: float,
+    *,
+    expected_secs: float | None = None,
+) -> float:
+    """Return the Fast Scheduler V2 polling cadence for one remote image task."""
+    expected = max(10.0, float(expected_secs or 45.0))
+    elapsed = max(0.0, float(elapsed_secs))
+    if elapsed < expected * 0.65:
+        return float(config.image_poll_interval_secs)
+    if elapsed <= expected * 1.8:
+        return float(config.image_poll_near_completion_secs)
+    return float(config.image_poll_late_interval_secs)
 CODEX_RESPONSES_INSTRUCTIONS = (
     "Use the image_generation tool to create exactly one image for the user's request. "
     "Return the generated image result."
@@ -177,6 +192,7 @@ class OpenAIBackendAPI:
         self.progress_callback: Callable[[str], None] | None = None
         self.cancel_event: Any | None = None
         self.image_deadline_monotonic: float | None = None
+        self.image_expected_latency_secs: float = 45.0
         self.session = requests.Session(**proxy_settings.build_session_kwargs(
             account=self.account,
             impersonate=self.fp["impersonate"],
@@ -846,6 +862,7 @@ class OpenAIBackendAPI:
         })
         try:
             with urllib.request.urlopen(request, timeout=self._image_request_timeout(300)) as raw:
+                self._report_progress("upstream_accepted")
                 yield from self._iter_codex_response_events(raw)
         except urllib.error.HTTPError as error:
             body_text = error.read().decode("utf-8", "replace")
@@ -1035,6 +1052,7 @@ class OpenAIBackendAPI:
             stream=True,
         )
         ensure_ok(response, path)
+        self._report_progress("upstream_accepted")
         return response
 
     def _get_conversation(self, conversation_id: str) -> Dict[str, Any]:
@@ -2126,19 +2144,20 @@ class OpenAIBackendAPI:
     ) -> tuple[list[str], list[str]]:
         """Poll the conversation document until image file ids appear or budget runs out.
 
-        - Sleeps image_poll_initial_wait_secs first (default 10s, +jitter). ChatGPT
-          image generation takes ~30s; polling immediately wastes requests and trips
-          a transient 429 the upstream returns within ~200ms of the SSE stream
-          closing (the conversation document is not yet committed).
-        - Subsequent polls are image_poll_interval_secs apart (default 10s).
+        - Sleeps a short configurable delay first (default 3s, +jitter).
+        - Polls every 2-5 seconds based on the account's expected completion time.
         - On upstream 429 / 5xx or network errors, backs off exponentially
           (capped at 16s, +jitter) honoring Retry-After when present.
         - All sleeps stay within timeout_secs; on exhaustion raises ImagePollTimeoutError.
         """
         start = time.time()
         attempt = 0
-        interval = float(config.image_poll_interval_secs)
         initial_wait = float(config.image_poll_initial_wait_secs)
+        expected_secs = max(
+            10.0,
+            float(getattr(self, "image_expected_latency_secs", 45.0) or 45.0),
+        )
+        jitter_min, jitter_max = config.image_poll_jitter_range_secs
         file_ids: list[str] = []
         sediment_ids: list[str] = []
         self._add_unique(file_ids, initial_file_ids or [])
@@ -2152,10 +2171,15 @@ class OpenAIBackendAPI:
             "conversation_id": conversation_id,
             "timeout_secs": timeout_secs,
             "initial_wait_secs": initial_wait,
-            "interval_secs": interval,
+            "normal_interval_secs": config.image_poll_interval_secs,
+            "near_interval_secs": config.image_poll_near_completion_secs,
+            "late_interval_secs": config.image_poll_late_interval_secs,
+            "expected_completion_secs": expected_secs,
             "initial_file_ids": file_ids,
             "initial_sediment_ids": sediment_ids,
         })
+        if callable(getattr(self, "progress_callback", None)):
+            self.progress_callback("polling")
 
         def _remaining() -> float:
             return timeout_secs - (time.time() - start)
@@ -2180,7 +2204,7 @@ class OpenAIBackendAPI:
             if settle_for > 0:
                 _sleep(settle_for)
         elif initial_wait > 0:
-            jitter = random.uniform(0, min(2.0, initial_wait * 0.2))
+            jitter = random.uniform(jitter_min, jitter_max)
             sleep_for = min(initial_wait + jitter, max(0.0, _remaining()))
             if sleep_for > 0:
                 _sleep(sleep_for)
@@ -2302,7 +2326,12 @@ class OpenAIBackendAPI:
                 return file_ids, sediment_ids
             logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
                           "elapsed_secs": round(time.time() - start, 1)})
-            wait = min(interval, max(0.0, _remaining()))
+            elapsed = time.time() - start
+            interval = image_poll_interval_for_elapsed(elapsed, expected_secs=expected_secs)
+            wait = min(
+                interval + random.uniform(jitter_min, jitter_max),
+                max(0.0, _remaining()),
+            )
             if wait > 0:
                 _sleep(wait)
         logger.info({

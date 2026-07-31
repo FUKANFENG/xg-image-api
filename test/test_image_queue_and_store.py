@@ -106,7 +106,7 @@ class ImageQueueAndStoreTests(unittest.TestCase):
             self.assertEqual(legacy_path.read_text(encoding="utf-8"), original)
             self.assertGreater(len(store.snapshot_bytes()), 0)
 
-    def test_web_failures_open_circuit_then_real_request_runs_half_open(self) -> None:
+    def test_only_hard_rate_limit_opens_circuit_then_real_request_runs_half_open(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
             service.add_account_items([{
@@ -121,7 +121,11 @@ class ImageQueueAndStoreTests(unittest.TestCase):
                 "image_account_concurrency": 3,
             }):
                 service.mark_image_result("web-token", False, error_kind="timeout")
-                opened = service.mark_image_result("web-token", False, error_kind="timeout")
+                degraded = service.mark_image_result("web-token", False, error_kind="timeout")
+                self.assertEqual(degraded["image_circuit_state"], "degraded")
+                self.assertEqual(service._adaptive_image_concurrency("web-token"), 1)
+
+                opened = service.mark_image_result("web-token", False, error_kind="429 rate limit")
                 self.assertEqual(opened["image_circuit_state"], "open")
                 self.assertEqual(service._adaptive_image_concurrency("web-token"), 0)
 

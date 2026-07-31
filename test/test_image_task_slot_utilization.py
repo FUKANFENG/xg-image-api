@@ -80,9 +80,11 @@ class ImageTaskSlotUtilizationTests(unittest.TestCase):
                     service.release_image_slot(first)
 
             self.assertEqual(snapshot["healthy_accounts"], 2)
-            self.assertEqual(snapshot["total_slots"], 4)
+            # Fast recovery starts accounts without historical safe capacity at one
+            # probe slot. They expand after consecutive successful generations.
+            self.assertEqual(snapshot["total_slots"], 2)
             self.assertEqual(snapshot["used_slots"], 1)
-            self.assertEqual(snapshot["available_slots"], 3)
+            self.assertEqual(snapshot["available_slots"], 1)
 
     def test_single_owner_borrows_all_idle_account_slots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -159,6 +161,101 @@ class ImageTaskSlotUtilizationTests(unittest.TestCase):
             finally:
                 self.release_and_wait(handler, service, 3)
 
+    def test_completed_remote_slot_is_reused_before_postprocessing_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            handler_started = threading.Event()
+            postprocess_started = threading.Event()
+            release_postprocess = threading.Event()
+            handler_count = 0
+            handler_lock = threading.Lock()
+
+            def handler(_payload):
+                nonlocal handler_count
+                with handler_lock:
+                    handler_count += 1
+                    if handler_count >= 2:
+                        handler_started.set()
+                return {"data": [{"url": "http://example.test/image.png"}]}
+
+            def record_success(_task):
+                postprocess_started.set()
+                release_postprocess.wait(2)
+                return []
+
+            service = ImageTaskService(
+                Path(tmp_dir) / "tasks.json",
+                generation_handler=handler,
+                edit_handler=handler,
+                global_concurrency_getter=lambda: 1,
+                user_concurrency_getter=lambda: 1,
+                queue_capacity_getter=lambda: 20,
+                account_capacity_getter=lambda: 1,
+            )
+            with patch(
+                "services.creative_workspace_service.creative_workspace_service.record_task_success",
+                side_effect=record_success,
+            ):
+                try:
+                    self.submit(service, OWNER_A, "handoff", 2)
+                    self.assertTrue(postprocess_started.wait(2))
+                    self.assertTrue(
+                        handler_started.wait(1),
+                        "the next remote task should start while local postprocessing is blocked",
+                    )
+                finally:
+                    release_postprocess.set()
+                    wait_until(lambda: not service._active_attempts)
+
+    def test_blocked_postprocessing_has_a_separate_hard_concurrency_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            postprocess_gate = threading.Event()
+            handler_lock = threading.Lock()
+            handler_count = 0
+
+            def handler(_payload):
+                nonlocal handler_count
+                with handler_lock:
+                    handler_count += 1
+                return {"data": [{"url": "http://example.test/image.png"}]}
+
+            def record_success(_task):
+                postprocess_gate.wait(3)
+                return []
+
+            service = ImageTaskService(
+                Path(tmp_dir) / "tasks.json",
+                generation_handler=handler,
+                edit_handler=handler,
+                global_concurrency_getter=lambda: 12,
+                user_concurrency_getter=lambda: 12,
+                queue_capacity_getter=lambda: 50,
+                account_capacity_getter=lambda: 12,
+            )
+            with patch(
+                "services.creative_workspace_service.creative_workspace_service.record_task_success",
+                side_effect=record_success,
+            ):
+                try:
+                    self.submit(service, OWNER_A, "bounded-postprocess", 30)
+                    wait_until(
+                        lambda: service.metrics()["performance"]["postprocess_active"] == 8
+                    )
+                    time.sleep(0.1)
+                    with handler_lock:
+                        started_while_blocked = handler_count
+                    self.assertLessEqual(started_while_blocked, 20)
+                    self.assertEqual(
+                        service.metrics()["performance"]["postprocess_concurrency"],
+                        8,
+                    )
+                finally:
+                    postprocess_gate.set()
+                    wait_until(
+                        lambda: not service._active_attempts
+                        and service.metrics()["performance"]["postprocess_active"] == 0,
+                        timeout=5.0,
+                    )
+
     def test_terminal_reader_cannot_double_settle_project_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             consume_started = threading.Event()
@@ -196,7 +293,10 @@ class ImageTaskSlotUtilizationTests(unittest.TestCase):
                 task = service.list_tasks(OWNER_A, ["budget-race"])["items"][0]
                 self.assertEqual(task["status"], "success")
                 release_consume.set()
-                wait_until(lambda: service._running_total == 0)
+                wait_until(
+                    lambda: service._running_total == 0
+                    and not service._active_attempts
+                )
 
             self.assertEqual(consume_mock.call_count, 1)
 

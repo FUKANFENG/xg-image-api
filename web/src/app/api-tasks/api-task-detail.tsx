@@ -74,6 +74,14 @@ export function ApiTaskDetail({
         ["请求尺寸", task.size || "自动"],
         ["质量", task.quality || "auto"],
         ["请求张数", task.request_n ? String(task.request_n) : "-"],
+        [
+          "子任务进度",
+          task.child_total
+            ? `${task.completed_children || 0}/${task.child_total} 完成${
+                task.failed_children ? `，${task.failed_children} 失败` : ""
+              }`
+            : "-",
+        ],
         ["返回格式", task.response_format || "-"],
         ["创建时间", readableTime(task.created_at)],
         ["更新时间", readableTime(task.updated_at)],

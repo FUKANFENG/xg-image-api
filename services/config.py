@@ -424,26 +424,100 @@ class ConfigStore:
     @property
     def image_poll_timeout_secs(self) -> int:
         try:
-            return max(1, int(self.data.get("image_poll_timeout_secs", 300)))
+            return max(
+                1,
+                int(
+                    self.data.get(
+                        "generation_timeout_seconds",
+                        self.data.get("image_poll_timeout_secs", 300),
+                    )
+                ),
+            )
         except (TypeError, ValueError):
             return 300
 
     @property
     def image_poll_interval_secs(self) -> float:
         try:
-            return max(0.5, float(self.data.get("image_poll_interval_secs", 10.0)))
+            return max(
+                0.5,
+                float(
+                    self.data.get(
+                        "poll_normal_interval_seconds",
+                        self.data.get("image_poll_interval_secs", 4.0),
+                    )
+                ),
+            )
         except (TypeError, ValueError):
-            return 10.0
+            return 4.0
 
     @property
     def image_poll_initial_wait_secs(self) -> float:
-        """Image generation upstream takes ~30s; polling immediately wastes requests
-        and trips a transient 429. Default 10s gives the conversation document time
-        to commit before the first poll."""
+        """Delay before the first result check.
+
+        Fast Scheduler V2 starts at three seconds, then relies on jitter and
+        adaptive intervals to avoid synchronized request bursts.
+        """
         try:
-            return max(0.0, float(self.data.get("image_poll_initial_wait_secs", 10.0)))
+            return max(
+                0.0,
+                float(
+                    self.data.get(
+                        "poll_first_delay_seconds",
+                        self.data.get("image_poll_initial_wait_secs", 3.0),
+                    )
+                ),
+            )
         except (TypeError, ValueError):
-            return 10.0
+            return 3.0
+
+    @property
+    def image_poll_near_completion_secs(self) -> float:
+        try:
+            return max(0.5, float(self.data.get("poll_near_completion_seconds", 2.0)))
+        except (TypeError, ValueError):
+            return 2.0
+
+    @property
+    def image_poll_late_interval_secs(self) -> float:
+        try:
+            return max(0.5, float(self.data.get("poll_late_interval_seconds", 5.0)))
+        except (TypeError, ValueError):
+            return 5.0
+
+    @property
+    def image_poll_jitter_range_secs(self) -> tuple[float, float]:
+        try:
+            minimum = max(0.0, float(self.data.get("poll_jitter_min_seconds", 0.2)))
+            maximum = max(minimum, float(self.data.get("poll_jitter_max_seconds", 0.8)))
+            return min(minimum, 5.0), min(maximum, 5.0)
+        except (TypeError, ValueError):
+            return 0.2, 0.8
+
+    @property
+    def image_submit_timeout_secs(self) -> float:
+        try:
+            return min(300.0, max(1.0, float(self.data.get("image_submit_timeout_secs", 30.0))))
+        except (TypeError, ValueError):
+            return 30.0
+
+    @property
+    def image_v1_sync_wait_timeout_secs(self) -> float:
+        try:
+            return min(
+                7_200.0,
+                max(
+                    1.0,
+                    float(
+                        self.data.get(
+                            "image_v1_sync_wait_timeout_secs",
+                            self.data.get("queue_timeout_seconds", 1_800.0),
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            return 1_800.0
 
     @property
     def image_account_preflight_cache_secs(self) -> float:
@@ -463,23 +537,103 @@ class ConfigStore:
     @property
     def image_global_concurrency(self) -> int:
         try:
-            return min(12, max(1, int(self.data.get("image_global_concurrency", 8))))
+            return min(
+                16,
+                max(
+                    1,
+                    int(
+                        self.data.get(
+                            "global_max_remote_tasks",
+                            self.data.get("image_global_concurrency", 8),
+                        )
+                    ),
+                ),
+            )
         except (TypeError, ValueError):
             return 8
 
     @property
     def image_user_concurrency(self) -> int:
         try:
-            return min(self.image_global_concurrency, max(1, int(self.data.get("image_user_concurrency", 2))))
+            return min(
+                self.image_global_concurrency,
+                max(
+                    1,
+                    int(
+                        self.data.get(
+                            "image_user_base_concurrency",
+                            self.data.get("image_user_concurrency", 2),
+                        )
+                    ),
+                ),
+            )
         except (TypeError, ValueError):
             return min(2, self.image_global_concurrency)
 
     @property
     def image_queue_capacity(self) -> int:
         try:
-            return min(10_000, max(1, int(self.data.get("image_queue_capacity", 100))))
+            return min(
+                10_000,
+                max(
+                    1,
+                    int(
+                        self.data.get(
+                            "queue_capacity",
+                            self.data.get("image_queue_capacity", 500),
+                        )
+                    ),
+                ),
+            )
         except (TypeError, ValueError):
-            return 100
+            return 500
+
+    @property
+    def image_allow_user_borrowing(self) -> bool:
+        return _normalize_bool(self.data.get("allow_user_borrowing", True))
+
+    @property
+    def image_priority_aging_secs(self) -> float:
+        try:
+            return min(3_600.0, max(1.0, float(self.data.get("priority_aging_seconds", 30.0))))
+        except (TypeError, ValueError):
+            return 30.0
+
+    @property
+    def account_fast_recovery(self) -> bool:
+        return _normalize_bool(self.data.get("account_fast_recovery", True))
+
+    @property
+    def account_probe_successes(self) -> int:
+        try:
+            return min(20, max(1, int(self.data.get("account_probe_successes", 3))))
+        except (TypeError, ValueError):
+            return 3
+
+    @property
+    def account_soft_recovery_seconds(self) -> int:
+        try:
+            return min(3_600, max(0, int(self.data.get("account_soft_recovery_seconds", 60))))
+        except (TypeError, ValueError):
+            return 60
+
+    @property
+    def account_hard_rate_limit_cooldown_seconds(self) -> int:
+        try:
+            return min(
+                7_200,
+                max(
+                    30,
+                    int(
+                        self.data.get(
+                            "account_hard_rate_limit_cooldown_seconds",
+                            self.data.get("image_circuit_cooldown_secs", 300),
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            return 300
 
     @property
     def image_circuit_failure_threshold(self) -> int:
@@ -635,11 +789,30 @@ class ConfigStore:
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
+        data["generation_timeout_seconds"] = self.image_poll_timeout_secs
+        data["image_submit_timeout_secs"] = self.image_submit_timeout_secs
+        data["image_v1_sync_wait_timeout_secs"] = self.image_v1_sync_wait_timeout_secs
+        data["poll_first_delay_seconds"] = self.image_poll_initial_wait_secs
+        data["poll_normal_interval_seconds"] = self.image_poll_interval_secs
+        data["poll_near_completion_seconds"] = self.image_poll_near_completion_secs
+        data["poll_late_interval_seconds"] = self.image_poll_late_interval_secs
+        data["poll_jitter_min_seconds"], data["poll_jitter_max_seconds"] = self.image_poll_jitter_range_secs
         data["image_account_preflight_cache_secs"] = self.image_account_preflight_cache_secs
         data["image_account_concurrency"] = self.image_account_concurrency
         data["image_global_concurrency"] = self.image_global_concurrency
         data["image_user_concurrency"] = self.image_user_concurrency
         data["image_queue_capacity"] = self.image_queue_capacity
+        data["global_max_remote_tasks"] = self.image_global_concurrency
+        data["image_user_base_concurrency"] = self.image_user_concurrency
+        data["queue_capacity"] = self.image_queue_capacity
+        data["allow_user_borrowing"] = self.image_allow_user_borrowing
+        data["priority_aging_seconds"] = self.image_priority_aging_secs
+        data["account_fast_recovery"] = self.account_fast_recovery
+        data["account_probe_successes"] = self.account_probe_successes
+        data["account_soft_recovery_seconds"] = self.account_soft_recovery_seconds
+        data["account_hard_rate_limit_cooldown_seconds"] = (
+            self.account_hard_rate_limit_cooldown_seconds
+        )
         data["image_circuit_failure_threshold"] = self.image_circuit_failure_threshold
         data["image_circuit_cooldown_secs"] = self.image_circuit_cooldown_secs
         data["image_transient_server_retries"] = self.image_transient_server_retries
@@ -694,6 +867,19 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         next_data.update(dict(data or {}))
+        scheduler_aliases = {
+            "image_poll_timeout_secs": "generation_timeout_seconds",
+            "image_poll_interval_secs": "poll_normal_interval_seconds",
+            "image_poll_initial_wait_secs": "poll_first_delay_seconds",
+            "image_global_concurrency": "global_max_remote_tasks",
+            "image_user_concurrency": "image_user_base_concurrency",
+            "image_queue_capacity": "queue_capacity",
+        }
+        for legacy_name, fast_name in scheduler_aliases.items():
+            if fast_name in data:
+                next_data[legacy_name] = data[fast_name]
+            elif legacy_name in data:
+                next_data[fast_name] = data[legacy_name]
         if "ai_review" in data and isinstance(data.get("ai_review"), dict):
             current_review = dict(self.data.get("ai_review") or {})
             incoming_review = dict(data.get("ai_review") or {})

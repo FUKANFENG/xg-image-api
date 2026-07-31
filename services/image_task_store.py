@@ -152,6 +152,13 @@ class ImageTaskStore:
         with self._connection() as connection:
             connection.execute(self._upsert_sql(), row)
 
+    def upsert_many(self, tasks: Iterable[dict[str, Any]]) -> None:
+        rows = [row for task in tasks if (row := self._task_row(task)) is not None]
+        if not rows:
+            return
+        with self._connection() as connection:
+            connection.executemany(self._upsert_sql(), rows)
+
     def replace_all(self, tasks: Iterable[dict[str, Any]]) -> None:
         rows = [row for task in tasks if (row := self._task_row(task)) is not None]
         with self._connection() as connection:

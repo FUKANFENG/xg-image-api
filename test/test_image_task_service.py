@@ -31,6 +31,16 @@ def wait_for_task(service: ImageTaskService, identity: dict[str, object], task_i
     raise AssertionError(f"task {task_id} did not reach {status}, last={last}")
 
 
+def wait_for_idle(service: ImageTaskService, timeout: float = 2.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with service._lock:
+            if service._running_total == 0 and not service._active_attempts:
+                return
+        time.sleep(0.02)
+    raise AssertionError("image task service did not become idle")
+
+
 class ImageTaskServiceTests(unittest.TestCase):
     def make_service(self, path: Path, handler=None) -> ImageTaskService:
         return ImageTaskService(
@@ -702,6 +712,7 @@ class ImageTaskServiceTests(unittest.TestCase):
             wait_for_task(service, OWNER, "high", "success")
             wait_for_task(service, OWNER, "low", "success")
             self.assertEqual(execution_order, ["first", "high", "low"])
+            wait_for_idle(service)
 
     def test_startup_marks_unfinished_tasks_as_error(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

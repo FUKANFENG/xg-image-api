@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, AsyncIterable, AsyncIterator, Iterator
 from urllib.parse import urlparse
 
 from curl_cffi import requests
@@ -195,6 +195,24 @@ def sse_json_stream(items) -> Iterator[str]:
     yield ": stream-open\n\n"
     try:
         for item in items:
+            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+    except Exception as exc:
+        logger.warning({
+            "event": "sse_stream_error",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+        })
+        error = exc.to_openai_error() if hasattr(exc, "to_openai_error") else {
+            "error": {"message": str(exc), "type": exc.__class__.__name__}
+        }
+        yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+async def async_sse_json_stream(items: AsyncIterable[object]) -> AsyncIterator[str]:
+    yield ": stream-open\n\n"
+    try:
+        async for item in items:
             yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
     except Exception as exc:
         logger.warning({

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any, Iterable, Iterator
+from typing import Any, AsyncIterable, AsyncIterator, Iterable, Iterator
 
 from fastapi import HTTPException
 
@@ -408,6 +408,142 @@ def collect_response(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     if not completed:
         raise RuntimeError("response generation failed")
     return completed
+
+
+def response_image_scheduler_payload(
+    body: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    prompt = extract_response_prompt(body.get("input"))
+    if not prompt:
+        raise HTTPException(status_code=400, detail={"error": "input text is required"})
+    model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"
+    tool = response_image_tool(body)
+    payload: dict[str, Any] = {
+        "prompt": prompt,
+        "model": model,
+        "n": 1,
+        "size": tool.get("size"),
+        "quality": str(tool.get("quality") or "auto"),
+        "response_format": "b64_json",
+        "stream": bool(body.get("stream")),
+    }
+    image_info = extract_response_image(body.get("input"))
+    if image_info:
+        image_data, mime_type = image_info
+        payload["images"] = [(image_data, "image.png", mime_type)]
+        payload["mask"] = []
+        return "edit", payload
+    return "generate", payload
+
+
+def response_image_from_result(
+    body: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    prompt = extract_response_prompt(body.get("input"))
+    model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"
+    tool = response_image_tool(body)
+    input_image_tokens = count_image_content_tokens(
+        _input_image_parts(body.get("input")),
+        model,
+    )
+    output = ImageOutput(
+        kind="result",
+        model=model,
+        index=1,
+        total=1,
+        created=int(result.get("created") or time.time()),
+        data=[
+            item
+            for item in result.get("data") or []
+            if isinstance(item, dict)
+        ],
+    )
+    return collect_response(stream_image_response(
+        [output],
+        prompt,
+        model,
+        input_image_tokens,
+        tool.get("size"),
+        str(tool.get("quality") or "auto"),
+    ))
+
+
+async def stream_scheduled_image_response(
+    chunks: AsyncIterable[dict[str, Any]],
+    body: dict[str, Any],
+) -> AsyncIterator[dict[str, Any]]:
+    prompt = extract_response_prompt(body.get("input"))
+    model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"
+    tool = response_image_tool(body)
+    input_image_tokens = count_image_content_tokens(
+        _input_image_parts(body.get("input")),
+        model,
+    )
+    response_id = f"resp_{uuid.uuid4().hex}"
+    created = int(time.time())
+    yield response_created(response_id, model, created)
+    async for chunk in chunks:
+        object_type = str(chunk.get("object") or "")
+        if object_type == "image.generation.message":
+            text = str(chunk.get("message") or "")
+            if not text:
+                continue
+            item = text_output_item(text)
+            usage = token_usage(
+                input_text_tokens=count_text_tokens(prompt, model),
+                input_image_tokens=input_image_tokens,
+                output_text_tokens=count_text_tokens(text, model),
+            )
+            yield {
+                "type": "response.output_text.delta",
+                "item_id": item["id"],
+                "output_index": 0,
+                "content_index": 0,
+                "delta": text,
+            }
+            yield {
+                "type": "response.output_text.done",
+                "item_id": item["id"],
+                "output_index": 0,
+                "content_index": 0,
+                "text": text,
+            }
+            yield {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": item,
+            }
+            yield response_completed(response_id, model, created, [item], usage)
+            return
+        if object_type != "image.generation.result":
+            continue
+        data = [
+            item
+            for item in chunk.get("data") or []
+            if isinstance(item, dict)
+        ]
+        items = image_output_items(prompt, data)
+        if not items:
+            continue
+        usage = image_usage(
+            input_text_tokens=count_text_tokens(prompt, model),
+            input_image_tokens=input_image_tokens,
+            output_tokens=count_image_output_items_tokens(
+                data,
+                tool.get("size"),
+                str(tool.get("quality") or "auto"),
+            ),
+        )
+        for output_index, item in enumerate(items):
+            yield {
+                "type": "response.output_item.done",
+                "output_index": output_index,
+                "item": item,
+            }
+        yield response_completed(response_id, model, created, items, usage)
+        return
+    raise RuntimeError("image generation failed")
 
 
 def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
