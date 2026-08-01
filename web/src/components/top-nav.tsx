@@ -46,6 +46,7 @@ type AdminNavItem = {
 const primaryAdminNavItems: AdminNavItem[] = [
   { href: "/console", label: "API 总览" },
   { href: "/image", label: "生图测试" },
+  { href: "/chat", label: "网页对话" },
   { href: "/api-tasks", label: "生图任务" },
   { href: "/settings?tab=api-docs", activeHref: "/settings", label: "API 接入" },
   { href: "/accounts", label: "账号池" },
