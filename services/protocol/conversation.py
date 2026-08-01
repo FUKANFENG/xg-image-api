@@ -1576,6 +1576,21 @@ def _generate_single_image(
                     "index": index,
                 })
 
+        def release_image_attempt() -> None:
+            """Release a shared-transport failure without degrading the account."""
+            nonlocal attempt_finished
+            if attempt_finished:
+                return
+            attempt_finished = True
+            try:
+                account_service.release_image_slot(token)
+            except Exception as exc:
+                logger.warning({
+                    "event": "image_account_slot_release_failed",
+                    "error_type": type(exc).__name__,
+                    "index": index,
+                })
+
         try:
             # Account selection and upstream submission use the short submit budget.
             # The full generation budget starts only after the upstream conversation
@@ -1767,8 +1782,18 @@ def _generate_single_image(
                     "index": index,
                 })
                 continue
-            finish_image_attempt(False, error_kind=image_attempt_error_kind(exc))
             last_error = str(exc)
+            transport_failure = (
+                not emitted_for_token
+                and (
+                    is_tls_connection_error(last_error)
+                    or is_connection_timeout_error(last_error)
+                )
+            )
+            if transport_failure:
+                release_image_attempt()
+            else:
+                finish_image_attempt(False, error_kind=image_attempt_error_kind(exc))
             logger.warning({
                 "event": "image_stream_fail",
                 "account_email": account_email,

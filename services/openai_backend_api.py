@@ -98,6 +98,35 @@ FILE_ID_RE = re.compile(r"\b(file[-_](?!service\b)[A-Za-z0-9_-]+)\b")
 REAL_IMAGE_FILE_ID_RE = re.compile(r"\bfile_00000000[a-f0-9]{24}\b")
 SEDIMENT_ID_RE = re.compile(r"sediment://([A-Za-z0-9_-]+)")
 IMAGE_POLL_SETTLE_SECS = 2.0
+IMAGE_UPLOAD_TRANSPORT_RETRIES = 2
+IMAGE_UPLOAD_RETRYABLE_CURL_CODES = {7, 18, 28, 35, 52, 55, 56, 92}
+
+
+def _image_upload_curl_code(error: BaseException) -> int:
+    try:
+        return int(getattr(error, "code", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_retryable_image_upload_error(error: BaseException) -> bool:
+    if isinstance(
+            error,
+            (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.SSLError,
+                requests.exceptions.Timeout,
+            ),
+    ):
+        return True
+    if _image_upload_curl_code(error) in IMAGE_UPLOAD_RETRYABLE_CURL_CODES:
+        return True
+    message = str(error or "").lower()
+    return (
+        any(f"curl: ({code})" in message for code in IMAGE_UPLOAD_RETRYABLE_CURL_CODES)
+        or "openssl_internal" in message
+        or "tls connect error" in message
+    )
 
 
 def image_poll_interval_for_elapsed(
@@ -193,11 +222,7 @@ class OpenAIBackendAPI:
         self.cancel_event: Any | None = None
         self.image_deadline_monotonic: float | None = None
         self.image_expected_latency_secs: float = 45.0
-        self.session = requests.Session(**proxy_settings.build_session_kwargs(
-            account=self.account,
-            impersonate=self.fp["impersonate"],
-            verify=True,
-        ))
+        self.session = self._new_session()
         self.session.headers.update({
             "User-Agent": self.user_agent,
             "Origin": self.base_url,
@@ -226,6 +251,71 @@ class OpenAIBackendAPI:
         })
         if self.access_token:
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+
+    def _new_session(self) -> requests.Session:
+        return requests.Session(**proxy_settings.build_session_kwargs(
+            account=self.account,
+            impersonate=self.fp["impersonate"],
+            verify=True,
+        ))
+
+    def _reset_session_after_upload_error(self) -> None:
+        previous = self.session
+        replacement = self._new_session()
+        replacement.headers.update(dict(getattr(previous, "headers", {}) or {}))
+        previous_cookies = getattr(previous, "cookies", None)
+        if previous_cookies:
+            try:
+                replacement.cookies.update(previous_cookies)
+            except Exception:
+                pass
+        self.session = replacement
+        try:
+            previous.close()
+        except Exception:
+            pass
+
+    def _wait_before_image_upload_retry(self, retry_count: int) -> None:
+        wait_secs = min(0.5 * (2 ** max(0, retry_count - 1)), 2.0)
+        deadline = getattr(self, "image_deadline_monotonic", None)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ImagePollTimeoutError("ChatGPT 生图总等待时间已用完")
+            wait_secs = min(wait_secs, remaining)
+        cancel_event = getattr(self, "cancel_event", None)
+        if cancel_event is not None:
+            if cancel_event.wait(wait_secs):
+                raise ImageTaskCancelledError("image task cancelled")
+            return
+        time.sleep(wait_secs)
+
+    def _image_upload_request(
+            self,
+            method: str,
+            url: str,
+            *,
+            stage: str,
+            image_index: int | None,
+            **kwargs,
+    ) -> requests.Response:
+        for attempt in range(IMAGE_UPLOAD_TRANSPORT_RETRIES + 1):
+            try:
+                return getattr(self.session, method)(url, **kwargs)
+            except Exception as exc:
+                if not _is_retryable_image_upload_error(exc) or attempt >= IMAGE_UPLOAD_TRANSPORT_RETRIES:
+                    raise
+                retry_count = attempt + 1
+                logger.warning({
+                    "event": "image_upload_transport_retry",
+                    "stage": stage,
+                    "image_index": image_index,
+                    "retry_count": retry_count,
+                    "error_type": type(exc).__name__,
+                    "curl_code": _image_upload_curl_code(exc),
+                })
+                self._reset_session_after_upload_error()
+                self._wait_before_image_upload_retry(retry_count)
 
     def close(self) -> None:
         if getattr(self, "_closed", False):
@@ -489,7 +579,11 @@ class OpenAIBackendAPI:
                 ext_part = mime.split("/", 1)[1].split("+")[0] if "/" in mime else "png"
                 extension = "jpg" if ext_part == "jpeg" else (ext_part or "png")
                 b64 = base64.b64encode(data).decode("ascii")
-                uploaded.append(self._upload_image(f"data:{mime};base64,{b64}", f"image_{idx}.{extension}"))
+                uploaded.append(self._upload_image(
+                    f"data:{mime};base64,{b64}",
+                    f"image_{idx}.{extension}",
+                    image_index=idx,
+                ))
             parts: list[Any] = []
             for ref in uploaded:
                 parts.append({
@@ -922,7 +1016,13 @@ class OpenAIBackendAPI:
         payload = image.split(",", 1)[1] if image.startswith("data:") and "," in image else image
         return base64.b64decode(payload)
 
-    def _upload_image(self, image: str, file_name: str = "image.png") -> Dict[str, Any]:
+    def _upload_image(
+            self,
+            image: str,
+            file_name: str = "image.png",
+            *,
+            image_index: int | None = None,
+    ) -> Dict[str, Any]:
         """上传一张 base64 图片，返回底层文件元数据。"""
         data = self._decode_image_base64(image)
         if (
@@ -939,8 +1039,11 @@ class OpenAIBackendAPI:
         width, height = image.size
         mime_type = Image.MIME.get(image.format, "image/png")
         path = "/backend-api/files"
-        response = self.session.post(
+        response = self._image_upload_request(
+            "post",
             self.base_url + path,
+            stage="register",
+            image_index=image_index,
             headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
             json={"file_name": file_name, "file_size": len(data), "use_case": "multimodal", "width": width,
                   "height": height},
@@ -948,8 +1051,11 @@ class OpenAIBackendAPI:
         )
         ensure_ok(response, path)
         upload_meta = response.json()
-        response = self.session.put(
+        response = self._image_upload_request(
+            "put",
             upload_meta["upload_url"],
+            stage="transfer",
+            image_index=image_index,
             headers={
                 "Content-Type": mime_type,
                 "x-ms-blob-type": "BlockBlob",
@@ -965,8 +1071,11 @@ class OpenAIBackendAPI:
         )
         ensure_ok(response, "image_upload")
         path = f"/backend-api/files/{upload_meta['file_id']}/uploaded"
-        response = self.session.post(
+        response = self._image_upload_request(
+            "post",
             self.base_url + path,
+            stage="complete",
+            image_index=image_index,
             headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
             data="{}",
             timeout=self._image_request_timeout(60),
@@ -2650,7 +2759,10 @@ class OpenAIBackendAPI:
         if not self.access_token:
             raise RuntimeError("access_token is required for image endpoints")
         self._report_progress("uploading")
-        references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
+        references = [
+            self._upload_image(image, f"image_{idx}.png", image_index=idx)
+            for idx, image in enumerate(images, start=1)
+        ]
         self._report_progress("bootstrapping")
         self._bootstrap()
         self._report_progress("getting_token")

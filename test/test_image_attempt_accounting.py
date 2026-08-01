@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from curl_cffi import requests
+
 
 import services.protocol.conversation as conversation
 from services.account_service import AccountService
@@ -139,6 +141,58 @@ class ImageAttemptAccountingTests(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertEqual(outputs[0].kind, "result")
         self.assertEqual(outputs[0].data[0]["url"], "http://example.test/image.png")
+
+    def test_tls_transport_failure_releases_slot_without_penalizing_account(self) -> None:
+        class TransportAwareService:
+            def __init__(self) -> None:
+                self.selected: list[str] = []
+                self.results: list[tuple[tuple, dict]] = []
+                self.released: list[str] = []
+
+            def get_available_access_token(self, **_kwargs):
+                self.selected.append("account-token")
+                return "account-token"
+
+            @staticmethod
+            def get_account(_token):
+                return {"email": "account@example.test", "status": "正常", "quota": 9}
+
+            @staticmethod
+            def image_account_reference(_token):
+                return "acct_fixture"
+
+            def mark_image_result(self, *args, **kwargs):
+                self.results.append((args, kwargs))
+
+            def release_image_slot(self, token: str) -> None:
+                self.released.append(token)
+
+        def tls_failure(_backend, _request, _index, _total):
+            raise requests.exceptions.SSLError(
+                "curl: (35) TLS connect error: OPENSSL_internal:invalid library (0)",
+                code=35,
+            )
+            yield  # pragma: no cover
+
+        service = TransportAwareService()
+        with (
+            patch.object(conversation, "account_service", service),
+            patch.object(conversation, "OpenAIBackendAPI", self._backend()),
+            patch.object(conversation, "stream_image_outputs", tls_failure),
+            patch.object(conversation, "_wait_for_image_budget", return_value=None),
+        ):
+            with self.assertRaises(conversation.ImageGenerationError) as raised:
+                list(conversation.stream_image_outputs_with_pool(
+                    conversation.ConversationRequest(model="gpt-image-2", prompt="transport retry")
+                ))
+
+        self.assertEqual(
+            str(raised.exception),
+            "upstream image connection failed, please retry later",
+        )
+        self.assertEqual(service.results, [])
+        self.assertEqual(service.released, ["account-token"] * 4)
+        self.assertEqual(service.selected, ["account-token"] * 4)
 
     def test_poll_timeout_after_submission_does_not_resubmit_on_another_account(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
