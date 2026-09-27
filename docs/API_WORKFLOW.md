@@ -4,7 +4,7 @@
 
 需要确保图片调用只走 ChatGPT Web、不消耗 Codex 生图额度，或需要文字对话、看图对话、参考图编辑、Mask、多图、Responses 和 SSE 的完整示例，请阅读 [`WEB_API_REFERENCE.md`](./WEB_API_REFERENCE.md)。Swagger、Postman 等工具可导入 [`openapi-web-api.yaml`](./openapi-web-api.yaml)。
 
-本机网页默认无需登录。推荐用 `.\scripts\start.ps1` 启动：无冲突时访问 `http://127.0.0.1:18080`，若端口被占用则使用脚本打印的实际地址。免登录只对启用了 `CHATGPT2API_WEB_NO_LOGIN` 的 loopback 同源浏览器请求生效；下列工作流 API 始终继续使用 Bearer API Key。
+本机网页默认无需登录。推荐用 `.\scripts\start.ps1` 启动：无冲突时访问 `http://127.0.0.1:18080`，若端口被占用则使用脚本打印的实际地址。局域网网页免登录还必须显式启用 `CHATGPT2API_LAN_NO_LOGIN`，并且仅认可 RFC1918 私有地址的同源浏览器请求。公网网页必须免登录时，可用 `CHATGPT2API_PUBLIC_NO_LOGIN_HOSTS=picture.example.com` 精确放行受控域名；不要使用通配符，且应认识到这会公开管理权限。下列工作流 API 始终继续使用 Bearer API Key。
 
 ## 最小接入
 

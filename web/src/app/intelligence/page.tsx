@@ -187,7 +187,7 @@ function Surface({
   return (
     <section
       className={cn(
-        "rounded-2xl border border-stone-200/80 bg-white shadow-[0_10px_34px_rgba(41,37,36,0.05)] dark:border-white/10 dark:bg-stone-950 dark:shadow-none",
+        "min-w-0 rounded-xl border border-stone-200/80 bg-white shadow-[0_10px_34px_rgba(41,37,36,0.05)] sm:rounded-2xl dark:border-white/10 dark:bg-stone-950 dark:shadow-none",
         className,
       )}
     >
@@ -800,9 +800,9 @@ export default function IntelligencePage() {
   }
 
   return (
-    <main className="min-h-[100dvh] bg-stone-50/70 px-4 py-6 text-stone-950 sm:px-6 sm:py-8 dark:bg-stone-950 dark:text-stone-50">
+    <main className="min-h-[100dvh] min-w-0 bg-stone-50/70 px-0 py-3 text-stone-950 sm:px-6 sm:py-8 dark:bg-stone-950 dark:text-stone-50">
       <div className="mx-auto w-full max-w-[1440px]">
-        <header className="rounded-2xl border border-stone-200/80 bg-white px-5 py-5 shadow-[0_10px_34px_rgba(41,37,36,0.05)] sm:px-7 sm:py-6 dark:border-white/10 dark:bg-stone-950 dark:shadow-none">
+        <header className="rounded-xl border border-stone-200/80 bg-white px-4 py-4 shadow-[0_10px_34px_rgba(41,37,36,0.05)] sm:rounded-2xl sm:px-7 sm:py-6 dark:border-white/10 dark:bg-stone-950 dark:shadow-none">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div>
               <div className="mb-3 inline-flex items-center gap-2 text-sm font-semibold text-violet-700 dark:text-violet-300">
@@ -832,7 +832,7 @@ export default function IntelligencePage() {
               ].map(([value, label]) => (
                 <div
                   key={label}
-                  className="min-w-24 rounded-xl bg-stone-100 px-3 py-2 dark:bg-white/8"
+                  className="min-w-0 rounded-xl bg-stone-100 px-2 py-2 sm:min-w-24 sm:px-3 dark:bg-white/8"
                 >
                   <div className="text-lg font-bold tabular-nums">{value}</div>
                   <div className="text-xs text-stone-500 dark:text-stone-400">
@@ -849,29 +849,29 @@ export default function IntelligencePage() {
           onValueChange={(value) => setTab(value as IntelligenceTab)}
           className="mt-5"
         >
-          <div className="overflow-x-auto pb-1">
-            <TabsList className="h-12 min-w-max rounded-xl border border-stone-200 bg-white p-1 dark:border-white/10 dark:bg-stone-900">
+          <div className="min-w-0 max-w-full pb-1 sm:overflow-x-auto">
+            <TabsList className="grid h-auto w-full min-w-0 grid-cols-2 gap-1 rounded-xl border border-stone-200 bg-white p-1 group-data-[orientation=horizontal]/tabs:h-auto sm:inline-flex sm:h-12 sm:w-auto sm:min-w-max sm:group-data-[orientation=horizontal]/tabs:h-12 dark:border-white/10 dark:bg-stone-900">
               <TabsTrigger
                 value="assets"
-                className="h-10 rounded-lg px-4 data-[state=active]:bg-violet-700 data-[state=active]:text-white"
+                className="h-11 rounded-lg px-2 text-xs sm:h-10 sm:px-4 sm:text-sm data-[state=active]:bg-violet-700 data-[state=active]:text-white"
               >
                 <Images /> 智能资产
               </TabsTrigger>
               <TabsTrigger
                 value="board"
-                className="h-10 rounded-lg px-4 data-[state=active]:bg-violet-700 data-[state=active]:text-white"
+                className="h-11 rounded-lg px-2 text-xs sm:h-10 sm:px-4 sm:text-sm data-[state=active]:bg-violet-700 data-[state=active]:text-white"
               >
                 <Palette /> 灵感画板
               </TabsTrigger>
               <TabsTrigger
                 value="notifications"
-                className="h-10 rounded-lg px-4 data-[state=active]:bg-violet-700 data-[state=active]:text-white"
+                className="h-11 rounded-lg px-2 text-xs sm:h-10 sm:px-4 sm:text-sm data-[state=active]:bg-violet-700 data-[state=active]:text-white"
               >
                 <Bell /> 完成通知
               </TabsTrigger>
               <TabsTrigger
                 value="delivery"
-                className="h-10 rounded-lg px-4 data-[state=active]:bg-violet-700 data-[state=active]:text-white"
+                className="h-11 rounded-lg px-2 text-xs sm:h-10 sm:px-4 sm:text-sm data-[state=active]:bg-violet-700 data-[state=active]:text-white"
               >
                 <FileArchive /> 预算交付
               </TabsTrigger>
@@ -978,7 +978,7 @@ export default function IntelligencePage() {
               </Surface>
             ) : null}
 
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.08fr)_minmax(420px,0.92fr)]">
+            <div className="grid min-w-0 grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.08fr)_minmax(420px,0.92fr)]">
               <Surface className="min-w-0 overflow-hidden">
                 <div className="flex flex-col gap-3 border-b border-stone-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between dark:border-white/10">
                   <div>
@@ -1018,7 +1018,7 @@ export default function IntelligencePage() {
                     </Button>
                   </div>
                 </div>
-                <div className="grid max-h-[760px] grid-cols-2 gap-3 overflow-y-auto p-4 sm:grid-cols-3">
+                <div className="grid max-h-[760px] min-w-0 grid-cols-2 gap-2 overflow-y-auto p-3 sm:grid-cols-3 sm:gap-3 sm:p-4">
                   {visibleAssets.map((item) => {
                     const id = "asset_id" in item ? item.asset_id : item.id;
                     return (
@@ -1027,7 +1027,7 @@ export default function IntelligencePage() {
                         key={id}
                         onClick={() => void loadAssetDetails(id)}
                         className={cn(
-                          "group overflow-hidden rounded-xl border bg-stone-50 text-left transition active:scale-[0.98] dark:bg-white/5",
+                              "group min-w-0 overflow-hidden rounded-xl border bg-stone-50 text-left transition active:scale-[0.98] dark:bg-white/5",
                           selectedAsset?.id === id
                             ? "border-violet-500 ring-2 ring-violet-100 dark:ring-violet-500/20"
                             : "border-stone-200 hover:border-violet-300 dark:border-white/10",
@@ -1338,7 +1338,7 @@ export default function IntelligencePage() {
           </TabsContent>
 
           <TabsContent value="board" className="mt-3">
-            <div className="grid gap-5 xl:grid-cols-[280px_minmax(0,1fr)]">
+            <div className="grid min-w-0 grid-cols-1 gap-5 xl:grid-cols-[280px_minmax(0,1fr)]">
               <Surface className="p-4">
                 <h2 className="font-semibold">灵感画板</h2>
                 <div className="mt-3 flex gap-2">
@@ -1577,7 +1577,7 @@ export default function IntelligencePage() {
           </TabsContent>
 
           <TabsContent value="notifications" className="mt-3">
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(420px,1.05fr)]">
+            <div className="grid min-w-0 grid-cols-1 gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(420px,1.05fr)]">
               <Surface className="p-5">
                 <div className="flex items-center justify-between gap-3">
                   <div>
@@ -1703,7 +1703,7 @@ export default function IntelligencePage() {
                     </label>
                     <div>
                       <div className="mb-2 text-sm font-medium">通知事件</div>
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                         {notificationEvents.map(([event, label]) => {
                           const active =
                             notificationSettings.events.includes(event);
@@ -1733,7 +1733,7 @@ export default function IntelligencePage() {
                         })}
                       </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                       <Button
                         variant="outline"
                         onClick={() =>
@@ -1843,7 +1843,7 @@ export default function IntelligencePage() {
           </TabsContent>
 
           <TabsContent value="delivery" className="mt-3">
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(460px,1.1fr)]">
+            <div className="grid min-w-0 grid-cols-1 gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(460px,1.1fr)]">
               <Surface className="p-5">
                 <div className="flex items-center gap-2">
                   <FolderKanban className="size-5 text-violet-700 dark:text-violet-300" />

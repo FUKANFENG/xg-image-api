@@ -7,7 +7,11 @@ from fastapi.concurrency import run_in_threadpool
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
-from api.image_inputs import parse_image_edit_request, read_image_sources
+from api.image_inputs import (
+    parse_image_edit_request,
+    persist_task_reference_images,
+    read_image_sources,
+)
 from api.support import require_admin, require_identity, resolve_image_base_url
 from services.account_service import account_service
 from services.advanced_creative_service import advanced_creative_service
@@ -314,6 +318,7 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
         images = await read_image_sources(image_sources)
+        uploaded_images = list(images)
         if profile and str(payload.get("profile_reference_included") or "").strip().lower() not in {"1", "true", "yes"}:
             reference_paths = list(profile.get("reference_paths") or [])
             images.extend(await run_in_threadpool(lambda: [_stored_reference(path) for path in reference_paths]))
@@ -333,33 +338,19 @@ def create_router() -> APIRouter:
             _validate_mask_dimensions(images, masks)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-        source_path = str(payload.get("source_path") or "").strip()
-        if not source_path and images:
-            try:
-                stored_source = await run_in_threadpool(
-                    image_storage_service.save,
-                    images[0][0],
-                    resolve_image_base_url(request),
-                    images[0][1].rsplit(".", 1)[-1] if "." in images[0][1] else "png",
-                )
-                source_path = stored_source.rel
-            except ImageStorageError:
-                # Preserve the original edit API contract: the upstream image
-                # handler remains responsible for rejecting malformed payloads.
-                source_path = ""
-        mask_paths: list[str] = []
-        for mask in masks or []:
-            try:
-                stored_mask = await run_in_threadpool(
-                    image_storage_service.save,
-                    mask[0],
-                    resolve_image_base_url(request),
-                    mask[1].rsplit(".", 1)[-1] if "." in mask[1] else "png",
-                )
-                mask_paths.append(stored_mask.rel)
-            except ImageStorageError:
-                mask_paths = []
-                break
+        base_url = resolve_image_base_url(request)
+        source_paths, source_names = await run_in_threadpool(
+            persist_task_reference_images,
+            uploaded_images,
+            base_url,
+            existing_first_path=str(payload.get("source_path") or "").strip(),
+        )
+        source_path = source_paths[0] if source_paths else ""
+        mask_paths, mask_names = await run_in_threadpool(
+            persist_task_reference_images,
+            masks or [],
+            base_url,
+        )
         try:
             task = await run_in_threadpool(
                 image_task_service.submit_edit,
@@ -380,10 +371,12 @@ def create_router() -> APIRouter:
                     "operation_type": str(payload.get("operation_type") or "edit"),
                     "conversation_id": str(payload.get("conversation_id") or ""),
                     "source_path": source_path,
-                    "source_paths": [source_path] if source_path else [],
+                    "source_paths": source_paths,
+                    "source_names": source_names,
                     "mask_path": mask_paths[0] if mask_paths else "",
                     "mask_paths": mask_paths,
-                    "source_name": images[0][1] if images else "",
+                    "mask_names": mask_names,
+                    "source_name": source_names[0] if source_names else (images[0][1] if images else ""),
                     "asset_name": str(payload.get("asset_name") or (images[0][1] if images else "")),
                     "priority": int(payload.get("priority") or 0),
                     "recipe_id": str(payload.get("recipe_id") or ""),

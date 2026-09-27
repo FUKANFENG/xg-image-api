@@ -345,6 +345,40 @@ class UnifiedApiSchedulerTests(unittest.TestCase):
             self.assertNotIn("source.png", persisted)
             self.assertNotIn("mask.png", persisted)
 
+    def test_api_edit_parent_exposes_persisted_reference_previews(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            captured_payloads: list[dict[str, object]] = []
+
+            def edit(payload):
+                captured_payloads.append(payload)
+                return {"created": 1, "data": [{"b64_json": "edited"}]}
+
+            service = ImageTaskService(
+                Path(tmp_dir) / "tasks.json",
+                edit_handler=edit,
+                global_concurrency_getter=lambda: 1,
+                user_concurrency_getter=lambda: 1,
+                queue_capacity_getter=lambda: 20,
+                account_capacity_getter=lambda: 1,
+            )
+
+            service.run_api_edit(ADMIN_A, {
+                "prompt": "edit with a tracked reference",
+                "model": "gpt-image-2",
+                "n": 1,
+                "response_format": "b64_json",
+                "images": [(b"source", "source.png", "image/png")],
+                "_task_workflow": {
+                    "source_paths": ["2026/08/28/source.png"],
+                    "source_names": ["source.png"],
+                },
+            })
+
+            parent = service.list_admin_task_page(limit=10)["items"][0]
+            self.assertEqual(parent["reference_images"][0]["name"], "source.png")
+            self.assertEqual(parent["reference_images"][0]["url"], "/images/2026/08/28/source.png")
+            self.assertNotIn("_task_workflow", captured_payloads[0])
+
     def test_sync_wait_timeout_does_not_cancel_background_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             handler = BlockingImageHandler()

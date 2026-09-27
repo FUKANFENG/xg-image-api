@@ -41,6 +41,7 @@ class AccountService:
 
     _NEW_ACCOUNT_INVALID_GRACE_SECONDS = 10 * 60
     _INVALID_CONFIRM_SECONDS = 30
+    _INVALID_MAX_DEFERRED_FAILURES = 2
     _ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 24 * 60 * 60
     _REFRESH_TOKEN_KEEPALIVE_SECONDS = 3 * 24 * 60 * 60
     _REFRESH_TOKEN_KEEPALIVE_ERROR_BACKOFF_SECONDS = 6 * 60 * 60
@@ -1747,11 +1748,17 @@ class AccountService:
     def _should_defer_invalid_token(self, account: dict | None, now: datetime) -> bool:
         if not isinstance(account, dict):
             return False
+        invalid_count = int(account.get("invalid_count") or 0)
+        # Never let a permanently rejected credential remain eligible forever.
+        # At most two rejections may be tolerated when they are too far apart to
+        # confirm each other. A third rejection always confirms that the
+        # credential must be quarantined or removed.
+        if invalid_count >= self._INVALID_MAX_DEFERRED_FAILURES:
+            return False
         created_at = self._parse_time(account.get("created_at"))
         if created_at is not None and (now - created_at).total_seconds() < self._NEW_ACCOUNT_INVALID_GRACE_SECONDS:
             return True
         last_invalid_at = self._parse_time(account.get("last_invalid_at"))
-        invalid_count = int(account.get("invalid_count") or 0)
         if invalid_count <= 0:
             return True
         if last_invalid_at is None:

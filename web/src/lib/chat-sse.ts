@@ -51,3 +51,29 @@ export function parseChatStreamData(data: string): ParsedChatStreamEvent {
 export function chatErrorMessage(value: unknown): string {
   return messageFromUnknown(value);
 }
+
+export function chatHttpErrorMessage(
+  status: number,
+  contentType: string,
+  body: string,
+): string {
+  const fallback = `请求失败 (${status})`;
+  const text = body.trim();
+  const isHtml =
+    contentType.toLowerCase().includes("text/html") ||
+    /^\s*(?:<!doctype\s+html|<html\b)/i.test(text);
+
+  if (isHtml) {
+    if ([502, 503, 504].includes(status)) {
+      return `公网网关暂时无法连接对话服务 (${status})，请稍后重试`;
+    }
+    return `对话服务返回了异常页面 (${status})，请稍后重试`;
+  }
+  if (!text) return fallback;
+
+  try {
+    return chatErrorMessage(JSON.parse(text)) || fallback;
+  } catch {
+    return text.length <= 300 ? text : fallback;
+  }
+}

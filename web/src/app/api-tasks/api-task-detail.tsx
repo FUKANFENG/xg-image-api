@@ -50,6 +50,7 @@ export function ApiTaskDetail({
   onOpenChange,
 }: ApiTaskDetailProps) {
   const [copied, setCopied] = useState("");
+  const referenceImages = task?.reference_images || [];
 
   const copy = async (label: string, value?: string) => {
     if (!value) return;
@@ -94,15 +95,15 @@ export function ApiTaskDetail({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[90vh] w-[min(94vw,940px)] flex-col gap-0 overflow-hidden rounded-3xl border-stone-200 bg-white p-0 dark:border-white/10 dark:bg-stone-900">
-        <DialogHeader className="shrink-0 border-b border-stone-100 px-5 py-5 pr-12 sm:px-7 dark:border-white/10">
+      <DialogContent className="flex max-h-[calc(100dvh-1rem-env(safe-area-inset-bottom))] w-auto flex-col gap-0 overflow-hidden rounded-2xl border-stone-200 bg-white p-0 sm:max-h-[90vh] sm:w-[min(94vw,940px)] sm:rounded-3xl dark:border-white/10 dark:bg-stone-900">
+        <DialogHeader className="shrink-0 border-b border-stone-100 px-4 py-4 pr-12 sm:px-7 sm:py-5 dark:border-white/10">
           <DialogTitle>生图任务详情</DialogTitle>
           <DialogDescription>
-            查看请求信息、运行结果及输出图片元数据。
+            查看参考图、请求信息、运行结果及输出图片元数据。
           </DialogDescription>
         </DialogHeader>
         {task ? (
-          <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-6 sm:px-7">
+          <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4 sm:space-y-6 sm:px-7 sm:py-6">
             <section>
               <div className="mb-2 flex items-center justify-between gap-3">
                 <h2 className="text-sm font-bold text-stone-900 dark:text-white">
@@ -141,6 +142,57 @@ export function ApiTaskDetail({
                     {task.error_code}
                   </p>
                 ) : null}
+              </section>
+            ) : null}
+
+            {referenceImages.length ? (
+              <section>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-bold text-stone-900 dark:text-white">
+                      参考图
+                    </h2>
+                    <p className="mt-1 text-xs text-stone-400">
+                      本次图片编辑实际使用的输入素材
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-semibold text-violet-700 dark:bg-violet-400/10 dark:text-violet-300">
+                    {referenceImages.length} 张
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 lg:grid-cols-4">
+                  {referenceImages.map((image, index) => (
+                    <article
+                      key={`${image.path}-${index}`}
+                      className="overflow-hidden rounded-2xl border border-violet-100 bg-violet-50/40 dark:border-violet-400/15 dark:bg-violet-400/5"
+                    >
+                      <a
+                        href={image.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="group relative block aspect-square overflow-hidden bg-stone-100"
+                        aria-label={`放大查看第 ${index + 1} 张参考图`}
+                      >
+                        <RuntimeImage
+                          src={image.url}
+                          alt={`参考图 ${index + 1}：${image.name}`}
+                          className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.03]"
+                        />
+                        <span className="absolute right-2 bottom-2 grid size-8 place-items-center rounded-full bg-black/65 text-white opacity-0 transition group-hover:opacity-100 group-focus-visible:opacity-100">
+                          <ExternalLink className="size-3.5" />
+                        </span>
+                      </a>
+                      <div className="p-2.5">
+                        <p className="truncate text-xs font-semibold text-stone-700 dark:text-stone-200" title={image.name}>
+                          {image.name}
+                        </p>
+                        <p className="mt-1 text-[11px] text-stone-400">
+                          {image.kind === "profile" ? "一致性档案参考" : "用户上传参考"}
+                        </p>
+                      </div>
+                    </article>
+                  ))}
+                </div>
               </section>
             ) : null}
 

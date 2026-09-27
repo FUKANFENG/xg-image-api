@@ -2,7 +2,17 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Menu, MoreHorizontal, Sparkles } from "lucide-react";
+import {
+  Activity,
+  ImageIcon,
+  LayoutDashboard,
+  ListChecks,
+  Menu,
+  MoreHorizontal,
+  Sparkles,
+  UsersRound,
+  type LucideIcon,
+} from "lucide-react";
 import { usePathname } from "next/navigation";
 
 import { HeaderActions } from "@/components/header-actions";
@@ -43,6 +53,11 @@ type AdminNavItem = {
   activeHref?: string;
 };
 
+type MobileAdminNavItem = AdminNavItem & {
+  icon: LucideIcon;
+  shortLabel: string;
+};
+
 const primaryAdminNavItems: AdminNavItem[] = [
   { href: "/console", label: "API 总览" },
   { href: "/image", label: "生图测试" },
@@ -51,6 +66,39 @@ const primaryAdminNavItems: AdminNavItem[] = [
   { href: "/settings?tab=api-docs", activeHref: "/settings", label: "API 接入" },
   { href: "/accounts", label: "账号池" },
   { href: "/monitor", label: "运行状态" },
+];
+
+const mobileAdminNavItems: MobileAdminNavItem[] = [
+  {
+    href: "/console",
+    label: "API 总览",
+    shortLabel: "总览",
+    icon: LayoutDashboard,
+  },
+  {
+    href: "/image",
+    label: "生图测试",
+    shortLabel: "生图",
+    icon: ImageIcon,
+  },
+  {
+    href: "/api-tasks",
+    label: "生图任务",
+    shortLabel: "任务",
+    icon: ListChecks,
+  },
+  {
+    href: "/accounts",
+    label: "账号池",
+    shortLabel: "账号",
+    icon: UsersRound,
+  },
+  {
+    href: "/monitor",
+    label: "运行状态",
+    shortLabel: "状态",
+    icon: Activity,
+  },
 ];
 
 const advancedAdminNavGroups: Array<{
@@ -171,13 +219,13 @@ export function TopNav() {
 
   return (
     <>
-      <header className="sticky top-0 z-50 border-b border-stone-200/70 bg-white/90 shadow-[0_1px_0_rgba(28,25,23,0.02)] backdrop-blur-xl dark:border-white/10 dark:bg-stone-950/90">
+      <header className="sticky top-0 z-40 border-b border-stone-200/70 bg-white/92 shadow-[0_1px_0_rgba(28,25,23,0.02)] backdrop-blur-xl dark:border-white/10 dark:bg-stone-950/92">
         {isAdmin ? (
-          <div className="flex min-h-12 flex-col gap-1 px-3 py-2 xl:h-12 xl:flex-row xl:items-center xl:justify-between xl:gap-3 xl:px-6 xl:py-0">
+          <div className="flex min-h-14 flex-col gap-1 px-3 py-1.5 xl:h-14 xl:flex-row xl:items-center xl:justify-between xl:gap-3 xl:px-6 xl:py-0">
             <div className="flex items-center justify-between gap-2 xl:justify-start xl:gap-3">
               <Sheet>
-                <SheetTrigger className="inline-flex size-8 items-center justify-center text-stone-700 transition hover:text-stone-950 xl:hidden dark:text-stone-200 dark:hover:text-white">
-                  <Menu className="size-4" />
+                <SheetTrigger className="inline-flex size-11 items-center justify-center rounded-xl text-stone-700 transition hover:bg-stone-100 hover:text-stone-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 xl:hidden dark:text-stone-200 dark:hover:bg-white/10 dark:hover:text-white">
+                  <Menu className="size-5" />
                   <span className="sr-only">打开导航</span>
                 </SheetTrigger>
                 <SheetContent side="left">
@@ -255,7 +303,7 @@ export function TopNav() {
               </Sheet>
               <Link
                 href={homeHref}
-                className="inline-flex shrink-0 items-center gap-2 py-1 text-[15px] font-bold tracking-tight text-stone-950 transition hover:text-stone-700 dark:text-stone-50 dark:hover:text-white"
+                className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-xl px-1.5 py-1 text-[15px] font-bold tracking-tight text-stone-950 transition hover:text-stone-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:text-stone-50 dark:hover:text-white"
               >
                 <span
                   aria-hidden="true"
@@ -536,6 +584,39 @@ export function TopNav() {
           </div>
         )}
       </header>
+      {isAdmin ? (
+        <nav
+          aria-label="移动端主要导航"
+          className="fixed inset-x-0 bottom-0 z-40 border-t border-stone-200/80 bg-white/92 px-2 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom))] shadow-[0_-12px_36px_-28px_rgba(28,25,23,0.5)] backdrop-blur-2xl xl:hidden dark:border-white/10 dark:bg-stone-950/92"
+        >
+          <div className="mx-auto grid max-w-md grid-cols-5 gap-1">
+            {mobileAdminNavItems.map((item) => {
+              const active = isAdminNavItemActive(pathname, item);
+              const Icon = item.icon;
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  aria-label={item.label}
+                  aria-current={active ? "page" : undefined}
+                  className={cn(
+                    "relative flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-xl px-1 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500",
+                    active
+                      ? "bg-violet-50 text-violet-800 dark:bg-violet-400/12 dark:text-violet-200"
+                      : "text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-white/8 dark:hover:text-white",
+                  )}
+                >
+                  <Icon className="size-5" strokeWidth={active ? 2.3 : 1.9} />
+                  <span className="truncate">{item.shortLabel}</span>
+                  {active ? (
+                    <span className="absolute top-0.5 h-0.5 w-5 rounded-full bg-violet-600 dark:bg-violet-300" />
+                  ) : null}
+                </Link>
+              );
+            })}
+          </div>
+        </nav>
+      ) : null}
       {isAdmin && SHOW_ADMIN_INFINITE_CANVAS ? (
         <Dialog open={isCanvasDialogOpen} onOpenChange={setIsCanvasDialogOpen}>
           <DialogContent showCloseButton={false} className="rounded-2xl p-6">

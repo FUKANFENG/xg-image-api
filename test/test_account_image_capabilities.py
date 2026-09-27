@@ -575,6 +575,48 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertIsNotNone(account)
             self.assertEqual(account["invalid_count"], 2)
 
+    def test_third_invalid_token_is_confirmed_when_failures_are_spaced_out(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([{
+                "access_token": "invalid-token",
+                "status": "正常",
+                "created_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+            }])
+
+            first_confirmed = service._record_invalid_token_seen(
+                "invalid-token",
+                "test",
+                "token invalidated (/backend-api/me)",
+            )
+            service.update_account(
+                "invalid-token",
+                {"last_invalid_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()},
+                quiet=True,
+            )
+            second_confirmed = service._record_invalid_token_seen(
+                "invalid-token",
+                "test",
+                "token invalidated (/backend-api/me)",
+            )
+            service.update_account(
+                "invalid-token",
+                {"last_invalid_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()},
+                quiet=True,
+            )
+            third_confirmed = service._record_invalid_token_seen(
+                "invalid-token",
+                "test",
+                "token invalidated (/backend-api/me)",
+            )
+
+            self.assertFalse(first_confirmed)
+            self.assertFalse(second_confirmed)
+            self.assertTrue(third_confirmed)
+            account = service.get_account("invalid-token")
+            self.assertIsNotNone(account)
+            self.assertEqual(account["invalid_count"], 3)
+
     def test_preflight_failure_classifies_invalidated_token_as_auth_rejection(self) -> None:
         self.assertEqual(
             AccountService._describe_image_preflight_failure(

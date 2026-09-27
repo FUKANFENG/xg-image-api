@@ -439,6 +439,13 @@ export type ImageTaskImage = {
   storage?: string;
 };
 
+export type ImageTaskInputImage = {
+  path: string;
+  url: string;
+  name: string;
+  kind: "reference" | "profile" | "mask";
+};
+
 export type ImageTask = {
   id: string;
   status: "queued" | "paused" | "running" | "success" | "error";
@@ -453,6 +460,8 @@ export type ImageTask = {
   prompt?: string;
   conversation_id?: string;
   data?: ImageTaskImage[];
+  reference_images?: ImageTaskInputImage[];
+  mask_images?: ImageTaskInputImage[];
   result_count?: number;
   request_n?: number;
   child_total?: number;

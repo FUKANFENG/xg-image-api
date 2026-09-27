@@ -40,17 +40,22 @@ class ImagesEditsApiTests(unittest.TestCase):
 
     def test_edit_accepts_json_image_url(self):
         """测试图片编辑接口支持官方 JSON image_url 引用。"""
-        response = self.client.post(
-            "/v1/images/edits",
-            headers=AUTH_HEADERS,
-            json={
-                "model": "gpt-image-2",
-                "prompt": "edit",
-                "images": [{"image_url": DATA_IMAGE_URL}],
-                "n": 1,
-                "response_format": "b64_json",
-            },
-        )
+        with mock.patch.object(
+            ai_module,
+            "persist_task_reference_images",
+            return_value=(["stored/reference.png"], ["image_url.png"]),
+        ):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers=AUTH_HEADERS,
+                json={
+                    "model": "gpt-image-2",
+                    "prompt": "edit",
+                    "images": [{"image_url": DATA_IMAGE_URL}],
+                    "n": 1,
+                    "response_format": "b64_json",
+                },
+            )
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(len(self.handle_calls), 1)
@@ -58,6 +63,8 @@ class ImagesEditsApiTests(unittest.TestCase):
         self.assertEqual(payload["prompt"], "edit")
         self.assertEqual(payload["n"], 1)
         self.assertEqual(payload["images"], [(PNG_BYTES, "image_url.png", "image/png")])
+        self.assertEqual(payload["_task_workflow"]["source_paths"], ["stored/reference.png"])
+        self.assertEqual(payload["_task_workflow"]["source_names"], ["image_url.png"])
 
     def test_edit_rejects_file_id_reference(self):
         """测试图片编辑接口对暂不支持的 file_id 返回明确错误。"""

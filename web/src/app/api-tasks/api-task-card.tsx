@@ -62,24 +62,28 @@ function readableTime(value: string) {
 export function ApiTaskCard({ task, onSelect }: ApiTaskCardProps) {
   const status = API_IMAGE_TASK_STATUS[task.status];
   const images = task.data || [];
+  const referenceImages = task.reference_images || [];
   const firstResult = images[0];
-  const previewImage = images.find(
+  const resultPreviewImage = images.find(
     (item) => item.url && item.storage !== "missing",
   );
+  const referencePreviewImage = referenceImages.find((item) => item.url);
+  const previewUrl = resultPreviewImage?.url || referencePreviewImage?.url;
+  const showingReferencePreview = !resultPreviewImage && Boolean(referencePreviewImage);
   const sourceLabel = task.source === "api" ? "同步 API" : "异步队列";
   const caller = task.caller_key_name || task.owner_id || "系统调用";
 
   return (
-    <article className="group grid gap-4 rounded-2xl border border-stone-200 bg-white p-4 shadow-[0_1px_2px_rgba(28,25,23,0.03)] transition hover:border-stone-300 hover:shadow-md sm:grid-cols-[116px_minmax(0,1fr)] lg:grid-cols-[132px_minmax(0,1fr)_220px] dark:border-white/10 dark:bg-stone-900 dark:hover:border-white/20">
+    <article className="group grid min-w-0 grid-cols-[88px_minmax(0,1fr)] gap-3 rounded-xl border border-stone-200 bg-white p-3 shadow-[0_1px_2px_rgba(28,25,23,0.03)] transition hover:border-stone-300 hover:shadow-md sm:grid-cols-[116px_minmax(0,1fr)] sm:gap-4 sm:rounded-2xl sm:p-4 lg:grid-cols-[132px_minmax(0,1fr)_220px] dark:border-white/10 dark:bg-stone-900 dark:hover:border-white/20">
       <button
         type="button"
         onClick={() => onSelect(task)}
-        className="relative aspect-square w-full overflow-hidden rounded-xl bg-stone-100 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 sm:w-[116px] lg:w-[132px] dark:bg-white/5 dark:focus-visible:ring-white"
+        className="relative size-[88px] overflow-hidden rounded-lg bg-stone-100 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 sm:size-[116px] sm:rounded-xl lg:size-[132px] dark:bg-white/5 dark:focus-visible:ring-white"
         aria-label={`查看任务 ${task.id} 详情`}
       >
-        {previewImage?.url ? (
+        {previewUrl ? (
           <RuntimeImage
-            src={previewImage.url}
+            src={previewUrl}
             alt=""
             className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
           />
@@ -95,6 +99,11 @@ export function ApiTaskCard({ task, onSelect }: ApiTaskCardProps) {
             )}
           </span>
         )}
+        {showingReferencePreview ? (
+          <span className="absolute top-2 left-2 rounded-md bg-violet-600/90 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-sm">
+            参考图
+          </span>
+        ) : null}
         {images.length > 1 ? (
           <span className="absolute right-2 bottom-2 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px] font-semibold text-white">
             +{images.length - 1}
@@ -122,16 +131,21 @@ export function ApiTaskCard({ task, onSelect }: ApiTaskCardProps) {
           <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-semibold text-stone-600 dark:bg-white/10 dark:text-stone-300">
             {sourceLabel}
           </span>
-          <span className="text-xs text-stone-400">
+          <span className="hidden text-xs text-stone-400 sm:inline">
             {task.mode === "edit" ? "图片编辑" : "文生图"}
           </span>
+          {referenceImages.length ? (
+            <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-semibold text-violet-700 dark:bg-violet-400/10 dark:text-violet-300">
+              参考图 {referenceImages.length} 张
+            </span>
+          ) : null}
           {task.child_total && task.child_total > 1 ? (
             <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-semibold text-violet-700 dark:bg-violet-400/10 dark:text-violet-300">
               子任务 {task.completed_children || 0}/{task.child_total}
               {task.failed_children ? ` · 失败 ${task.failed_children}` : ""}
             </span>
           ) : null}
-          <span className="font-mono text-[11px] text-stone-400">
+          <span className="hidden font-mono text-[11px] text-stone-400 sm:inline">
             {shortImageTaskId(task.id)}
           </span>
         </div>
@@ -146,7 +160,7 @@ export function ApiTaskCard({ task, onSelect }: ApiTaskCardProps) {
           </p>
         </button>
 
-        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs text-stone-500 dark:text-stone-400">
+        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1.5 text-xs text-stone-500 sm:mt-3 sm:gap-x-4 sm:gap-y-2 dark:text-stone-400">
           <span className="inline-flex items-center gap-1.5">
             <KeyRound className="size-3.5" />
             <span className="max-w-40 truncate" title={caller}>
@@ -157,7 +171,7 @@ export function ApiTaskCard({ task, onSelect }: ApiTaskCardProps) {
             <Clock3 className="size-3.5" />
             {readableTime(task.created_at)}
           </span>
-          <span>
+          <span className="hidden sm:inline">
             {task.model || "默认模型"} · {task.quality || "auto"} ·{" "}
             {task.size || "自动尺寸"}
           </span>
@@ -170,7 +184,7 @@ export function ApiTaskCard({ task, onSelect }: ApiTaskCardProps) {
         ) : null}
       </div>
 
-      <div className="flex flex-col justify-between gap-3 border-t border-stone-100 pt-3 sm:col-span-2 lg:col-span-1 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-4 dark:border-white/10">
+      <div className="col-span-2 flex flex-col justify-between gap-3 border-t border-stone-100 pt-3 sm:col-span-2 lg:col-span-1 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-4 dark:border-white/10">
         <dl className="grid grid-cols-3 gap-2 text-xs lg:grid-cols-1">
           <div className="min-w-0">
             <dt className="text-stone-400">耗时</dt>
@@ -203,15 +217,15 @@ export function ApiTaskCard({ task, onSelect }: ApiTaskCardProps) {
           </div>
         </dl>
         <div className="flex items-center justify-end gap-2">
-          {previewImage?.url ? (
+          {previewUrl ? (
             <Button
               variant="ghost"
               size="icon"
-              className="size-9 rounded-lg text-stone-500"
+              className="rounded-lg text-stone-500"
               asChild
             >
               <a
-                href={previewImage.url}
+                href={previewUrl}
                 target="_blank"
                 rel="noreferrer"
                 aria-label="在新窗口打开图片"
@@ -223,7 +237,7 @@ export function ApiTaskCard({ task, onSelect }: ApiTaskCardProps) {
           <Button
             type="button"
             variant="outline"
-            className="h-9 rounded-lg border-stone-200 bg-white px-3 text-xs dark:border-white/10 dark:bg-stone-900"
+            className="h-11 rounded-lg border-stone-200 bg-white px-3 text-xs sm:h-9 dark:border-white/10 dark:bg-stone-900"
             onClick={() => onSelect(task)}
           >
             <Maximize2 className="size-3.5" />

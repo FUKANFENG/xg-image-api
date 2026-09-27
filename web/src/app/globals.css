@@ -125,6 +125,8 @@
       rgba(240, 235, 227, 0.99) 100%
     );
     overscroll-behavior: none;
+    max-width: 100%;
+    overflow-x: clip;
   }
 
   .dark,
@@ -139,6 +141,12 @@
 
   body {
     @apply text-foreground;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  ::selection {
+    background: rgb(221 214 254 / 0.9);
+    color: rgb(41 37 36);
   }
 }
 
@@ -150,6 +158,22 @@
 
   .hide-scrollbar::-webkit-scrollbar {
     display: none;
+  }
+
+  .xg-mobile-scroll {
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+@media (max-width: 39.999rem) and (pointer: coarse) {
+  [data-slot="button"] {
+    min-height: 2.75rem;
+  }
+
+  [data-slot="select-item"] {
+    min-height: 2.75rem;
   }
 }
 

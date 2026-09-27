@@ -1752,9 +1752,9 @@ function AccountsPageContent() {
               </div>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[960px] text-left">
-                <thead className="sticky top-0 z-10 border-b border-stone-100 bg-stone-50/95 text-[11px] font-medium tracking-[0.14em] text-stone-500 uppercase backdrop-blur dark:border-white/10 dark:bg-stone-950/90 dark:text-stone-400">
+            <div className="overflow-x-visible md:overflow-x-auto">
+              <table className="block w-full text-left md:table md:min-w-[960px]">
+                <thead className="sticky top-0 z-10 hidden border-b border-stone-100 bg-stone-50/95 text-[11px] font-medium tracking-[0.14em] text-stone-500 uppercase backdrop-blur md:table-header-group dark:border-white/10 dark:bg-stone-950/90 dark:text-stone-400">
                   <tr>
                     <th className="w-12 px-4 py-3.5">
                       <Checkbox
@@ -1772,7 +1772,7 @@ function AccountsPageContent() {
                     <th className="w-36 px-4 py-3.5 text-right">操作</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="block md:table-row-group">
                   {currentRows.map((account) => {
                     const status = statusMeta[account.status];
                     const StatusIcon = status.icon;
@@ -1786,13 +1786,13 @@ function AccountsPageContent() {
                       <tr
                         key={account.access_token}
                         className={cn(
-                          "border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-violet-50/45 dark:border-white/8 dark:text-stone-300 dark:hover:bg-violet-400/8",
+                          "relative block border-b border-stone-100/80 p-4 text-sm text-stone-600 transition-colors hover:bg-violet-50/45 md:table-row md:p-0 dark:border-white/8 dark:text-stone-300 dark:hover:bg-violet-400/8",
                           isSelected
                             ? "bg-violet-50/70 dark:bg-violet-400/10"
                             : "",
                         )}
                       >
-                        <td className="px-4 py-3.5 align-top">
+                        <td className="absolute top-4 right-4 px-0 py-0 align-top md:static md:table-cell md:px-4 md:py-3.5">
                           <Checkbox
                             aria-label={`选择 ${account.email ?? "账号"}`}
                             checked={isSelected}
@@ -1809,7 +1809,7 @@ function AccountsPageContent() {
                             }}
                           />
                         </td>
-                        <td className="px-4 py-3.5 align-top">
+                        <td className="block pr-12 align-top md:table-cell md:px-4 md:py-3.5 md:pr-4">
                           <div className="flex min-w-0 items-start justify-between gap-3">
                             <div className="min-w-0">
                               <p
@@ -1851,7 +1851,7 @@ function AccountsPageContent() {
                             </button>
                           </div>
                         </td>
-                        <td className="px-4 py-3.5 align-top">
+                        <td className="mt-3 flex items-center justify-between rounded-xl bg-stone-50 p-3 align-top md:mt-0 md:table-cell md:rounded-none md:bg-transparent md:px-4 md:py-3.5 dark:bg-white/[0.035] md:dark:bg-transparent">
                           <Badge
                             variant={status.badge}
                             className="inline-flex items-center gap-1 rounded-md px-2 py-1"
@@ -1868,7 +1868,7 @@ function AccountsPageContent() {
                             </span>
                           </div>
                         </td>
-                        <td className="px-4 py-3.5 align-top">
+                        <td className="mt-2 block rounded-xl bg-stone-50 p-3 align-top md:mt-0 md:table-cell md:rounded-none md:bg-transparent md:px-4 md:py-3.5 dark:bg-white/[0.035] md:dark:bg-transparent">
                           <div className="space-y-1.5 text-xs">
                             <div className="flex items-center justify-between gap-3">
                               <span className="text-stone-500 dark:text-stone-400">
@@ -1927,7 +1927,7 @@ function AccountsPageContent() {
                             </div>
                           </div>
                         </td>
-                        <td className="px-4 py-3.5 align-top">
+                        <td className="mt-2 block rounded-xl bg-stone-50 p-3 align-top md:mt-0 md:table-cell md:rounded-none md:bg-transparent md:px-4 md:py-3.5 dark:bg-white/[0.035] md:dark:bg-transparent">
                           <div className="space-y-1.5 text-xs text-stone-500 dark:text-stone-400">
                             <div className="flex items-center gap-1.5">
                               <Clock3 className="size-3.5 shrink-0 text-stone-400" />
@@ -1946,8 +1946,8 @@ function AccountsPageContent() {
                             ) : null}
                           </div>
                         </td>
-                        <td className="px-4 py-3.5 align-top">
-                          <div className="flex items-center justify-end gap-1 text-stone-400">
+                        <td className="mt-3 block border-t border-stone-100 pt-3 align-top md:mt-0 md:table-cell md:border-0 md:px-4 md:py-3.5 dark:border-white/10">
+                          <div className="flex items-center justify-start gap-1 text-stone-400 md:justify-end">
                             <button
                               type="button"
                               aria-label={`编辑 ${account.email ?? "账号"}`}

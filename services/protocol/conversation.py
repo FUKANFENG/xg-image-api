@@ -104,8 +104,11 @@ def is_token_invalid_error(message: str) -> bool:
     text = str(message or "").lower()
     return (
         "token_invalidated" in text
+        or "token_expired" in text
         or "token_revoked" in text
         or "authentication token has been invalidated" in text
+        or "authentication token is expired" in text
+        or "authentication token has expired" in text
         or "invalidated oauth token" in text
     )
 

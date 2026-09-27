@@ -3,17 +3,35 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ruleName = "XG生图便携版-TCP-$Port"
+$ruleName = "XG-LAN-TCP-$Port"
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Port $Port"
     $elevated = Start-Process powershell.exe -Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
-    exit $elevated.ExitCode
+    if ($elevated.ExitCode -ne 0) {
+        throw "The elevated firewall configuration failed with exit code $($elevated.ExitCode)."
+    }
+    & netsh.exe advfirewall firewall show rule "name=$ruleName" *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "The firewall rule was not created."
+    }
+    exit 0
 }
 
-Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Private | Out-Null
+& netsh.exe advfirewall firewall delete rule "name=$ruleName" *> $null
+& netsh.exe advfirewall firewall add rule `
+    "name=$ruleName" `
+    dir=in `
+    action=allow `
+    protocol=TCP `
+    "localport=$Port" `
+    remoteip=localsubnet `
+    profile=private `
+    enable=yes *> $null
+if ($LASTEXITCODE -ne 0) {
+    throw "The firewall rule could not be created."
+}
 $addresses = Get-NetIPAddress -AddressFamily IPv4 -PrefixOrigin Dhcp,Manual -ErrorAction SilentlyContinue |
     Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
     Select-Object -ExpandProperty IPAddress -Unique

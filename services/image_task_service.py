@@ -9,9 +9,9 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
 
 from services.account_service import account_service
@@ -202,6 +202,70 @@ def _public_image_data(value: object) -> object:
     return public_items
 
 
+def _normalized_task_image_path(value: object) -> str:
+    source = _clean(value).replace("\\", "/")
+    if not source:
+        return ""
+    try:
+        parsed = urlsplit(source)
+        path = unquote(parsed.path)
+    except ValueError:
+        path = source.split("?", 1)[0]
+        parsed = None
+    marker = "/images/"
+    if marker in path:
+        path = path.split(marker, 1)[1]
+    elif parsed is not None and parsed.scheme:
+        return ""
+    path = path.strip("/")
+    candidate = PurePosixPath(path)
+    if not path or candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+        return ""
+    return candidate.as_posix()
+
+
+def _public_task_input_images(task: dict[str, Any]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    workflow = task.get("workflow") if isinstance(task.get("workflow"), dict) else {}
+
+    def values(list_key: str, single_key: str) -> list[object]:
+        raw = workflow.get(list_key)
+        if isinstance(raw, list):
+            return raw
+        single = workflow.get(single_key)
+        return [single] if single else []
+
+    source_names = workflow.get("source_names") if isinstance(workflow.get("source_names"), list) else []
+    mask_names = workflow.get("mask_names") if isinstance(workflow.get("mask_names"), list) else []
+    references: list[dict[str, str]] = []
+    masks: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def append_items(target: list[dict[str, str]], paths: list[object], names: list[object], kind: str) -> None:
+        for index, raw_path in enumerate(paths):
+            path = _normalized_task_image_path(raw_path)
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            fallback_name = PurePosixPath(path).name or f"image-{index + 1}.png"
+            name = _clean(names[index] if index < len(names) else fallback_name)[:200]
+            target.append({
+                "path": path,
+                "url": f"/images/{quote(path, safe='/')}",
+                "name": name or fallback_name,
+                "kind": kind,
+            })
+
+    append_items(references, values("source_paths", "source_path"), source_names, "reference")
+    append_items(
+        references,
+        values("profile_reference_paths", "profile_reference_path"),
+        [],
+        "profile",
+    )
+    append_items(masks, values("mask_paths", "mask_path"), mask_names, "mask")
+    return references, masks
+
+
 def _stored_image_path(value: object) -> str:
     source = _clean(value)
     if not source:
@@ -357,6 +421,11 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         item["conversation_id"] = task.get("conversation_id")
     if isinstance(task.get("workflow"), dict):
         item["workflow"] = dict(task["workflow"])
+        reference_images, mask_images = _public_task_input_images(task)
+        if reference_images:
+            item["reference_images"] = reference_images
+        if mask_images:
+            item["mask_images"] = mask_images
     if task.get("data") is not None:
         item["data"] = _public_image_data(task.get("data"))
         item["result_count"] = (
@@ -2075,6 +2144,7 @@ class ImageTaskService:
         payload: dict[str, Any],
     ) -> tuple[list[_ApiTaskCompletion], str, bool]:
         request_payload = dict(payload)
+        task_workflow = request_payload.pop("_task_workflow", None)
         request_n = max(1, min(4, _nonnegative_int(request_payload.get("n"), maximum=4) or 1))
         request_payload["n"] = request_n
         request_payload["stream"] = False
@@ -2084,6 +2154,7 @@ class ImageTaskService:
             endpoint=endpoint,
             payload=request_payload,
             request_n=request_n,
+            workflow=task_workflow if isinstance(task_workflow, dict) else None,
         )
         return (
             completions,
@@ -2388,6 +2459,7 @@ class ImageTaskService:
         endpoint: str,
         payload: dict[str, Any],
         request_n: int,
+        workflow: dict[str, object] | None = None,
     ) -> list[_ApiTaskCompletion]:
         owner = _owner_id(identity)
         parent_id = f"api-{uuid4().hex}"
@@ -2456,6 +2528,8 @@ class ImageTaskService:
                     }
                 ],
             }
+            if workflow:
+                parent["workflow"] = dict(workflow)
             self._tasks[parent_key] = parent
             try:
                 created_keys.append(parent_key)

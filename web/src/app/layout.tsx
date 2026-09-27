@@ -36,12 +36,14 @@ export default function RootLayout({
         }}
       >
         <Toaster position="top-center" richColors offset={48} />
-        <main className="min-h-screen overflow-x-clip bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.92),_rgba(245,239,231,0.96)_42%,_rgba(240,235,227,0.99)_100%)] px-4 pt-0 pb-2 text-stone-900 transition-colors duration-300 dark:bg-[radial-gradient(circle_at_top_left,_rgba(55,48,43,0.72),_rgba(28,25,23,0.98)_40%,_rgba(12,10,9,1)_100%)] dark:text-stone-100 sm:px-6 sm:pt-2 lg:px-8">
-          <div className="mx-auto box-border flex min-h-screen max-w-[1440px] flex-col gap-2 pt-[env(safe-area-inset-top)] sm:gap-5 sm:pt-0">
+        <div className="min-h-screen overflow-x-clip bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.92),_rgba(245,239,231,0.96)_42%,_rgba(240,235,227,0.99)_100%)] px-0 pt-0 text-stone-900 transition-colors duration-300 dark:bg-[radial-gradient(circle_at_top_left,_rgba(55,48,43,0.72),_rgba(28,25,23,0.98)_40%,_rgba(12,10,9,1)_100%)] dark:text-stone-100 sm:px-4 sm:pt-2 lg:px-6">
+          <div className="mx-auto box-border flex min-h-screen max-w-[1440px] min-w-0 flex-col gap-0 pt-[env(safe-area-inset-top)] sm:gap-4 sm:pt-0">
             <TopNav />
-            {children}
+            <div className="min-w-0 flex-1 px-3 pb-[calc(5rem+env(safe-area-inset-bottom))] sm:px-0 xl:pb-2">
+              {children}
+            </div>
           </div>
-        </main>
+        </div>
       </body>
     </html>
   );

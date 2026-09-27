@@ -5,7 +5,11 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from api.image_inputs import parse_image_edit_request, read_image_sources
+from api.image_inputs import (
+    parse_image_edit_request,
+    persist_task_reference_images,
+    read_image_sources,
+)
 from api.support import require_admin, require_identity, require_user_tool, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import editable_file_task_service
@@ -199,9 +203,30 @@ def create_router() -> APIRouter:
         )
         await filter_or_log(call, prompt)
         payload["images"] = await read_image_sources(image_sources)
+        base_url = resolve_image_base_url(request)
+        source_paths, source_names = await run_in_threadpool(
+            persist_task_reference_images,
+            payload["images"],
+            base_url,
+        )
+        mask_paths: list[str] = []
+        mask_names: list[str] = []
         if mask_sources:
             payload["mask"] = await read_image_sources(mask_sources)
-        payload["base_url"] = resolve_image_base_url(request)
+            mask_paths, mask_names = await run_in_threadpool(
+                persist_task_reference_images,
+                payload["mask"],
+                base_url,
+            )
+        payload["_task_workflow"] = {
+            "source_path": source_paths[0] if source_paths else "",
+            "source_paths": source_paths,
+            "source_names": source_names,
+            "mask_path": mask_paths[0] if mask_paths else "",
+            "mask_paths": mask_paths,
+            "mask_names": mask_names,
+        }
+        payload["base_url"] = base_url
         return await call.run_async(
             image_task_service.run_api_edit_async,
             dict(identity),

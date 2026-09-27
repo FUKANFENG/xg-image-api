@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import ipaddress
 import os
 from contextlib import asynccontextmanager
 from threading import Event
@@ -20,7 +23,12 @@ from services.image_service import start_image_cleanup_scheduler
 
 _WEB_DOCUMENT_CACHE_CONTROL = "no-store, no-cache, must-revalidate, max-age=0"
 _WEB_ASSET_CACHE_CONTROL = "no-cache, must-revalidate, max-age=0"
+_DIRECT_WEB_COOKIE_NAME = "chatgpt2api_direct_web"
 _LOCAL_WEB_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_PRIVATE_LAN_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
 
 
 def _env_enabled(name: str, *, default: bool = False) -> bool:
@@ -30,17 +38,64 @@ def _env_enabled(name: str, *, default: bool = False) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-def _is_direct_local_web_request(request: Request) -> bool:
-    """Recognize the local browser UI without weakening normal API auth."""
+def _is_private_lan_host(hostname: str) -> bool:
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return any(address in network for network in _PRIVATE_LAN_NETWORKS)
 
+
+def _public_no_login_hosts() -> set[str]:
+    raw_hosts = str(os.getenv("CHATGPT2API_PUBLIC_NO_LOGIN_HOSTS") or "")
+    return {
+        hostname.strip().lower().rstrip(".")
+        for hostname in raw_hosts.split(",")
+        if hostname.strip().rstrip(".")
+    }
+
+
+def _trusted_direct_web_hostname(request: Request) -> str:
     if not _env_enabled("CHATGPT2API_WEB_NO_LOGIN"):
+        return ""
+    hostname = str(request.url.hostname or "").strip().lower().rstrip(".")
+    if hostname in _LOCAL_WEB_HOSTS:
+        return hostname
+    if _env_enabled("CHATGPT2API_LAN_NO_LOGIN") and _is_private_lan_host(hostname):
+        return hostname
+    if hostname in _public_no_login_hosts():
+        return hostname
+    return ""
+
+
+def _direct_web_cookie_value(hostname: str) -> str:
+    auth_key = str(config.auth_key or "").strip()
+    if not hostname or not auth_key:
+        return ""
+    return hmac.new(
+        auth_key.encode("utf-8"),
+        f"direct-web:{hostname}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _has_valid_direct_web_cookie(request: Request, hostname: str) -> bool:
+    expected = _direct_web_cookie_value(hostname)
+    supplied = str(request.cookies.get(_DIRECT_WEB_COOKIE_NAME) or "").strip()
+    return bool(expected and supplied) and hmac.compare_digest(supplied, expected)
+
+
+def _is_direct_web_request(request: Request) -> bool:
+    """Recognize an explicitly trusted browser UI request."""
+
+    hostname = _trusted_direct_web_hostname(request)
+    if not hostname:
         return False
-    if str(request.url.hostname or "").strip().lower() not in _LOCAL_WEB_HOSTS:
-        return False
-    return str(request.headers.get("sec-fetch-site") or "").strip().lower() in {
+    fetch_site = str(request.headers.get("sec-fetch-site") or "").strip().lower()
+    return fetch_site in {
         "same-origin",
         "none",
-    }
+    } or _has_valid_direct_web_cookie(request, hostname)
 
 
 def _apply_cache_policy(request: Request, response: Response) -> None:
@@ -96,7 +151,7 @@ def create_app() -> FastAPI:
             return RedirectResponse(str(target), status_code=308)
         if not request.headers.get("authorization"):
             session_token = request.cookies.get("chatgpt2api_session", "").strip()
-            direct_web_admin = _is_direct_local_web_request(request)
+            direct_web_admin = _is_direct_web_request(request)
             effective_token = session_token or (
                 str(config.auth_key or "").strip() if direct_web_admin else ""
             )
@@ -111,6 +166,19 @@ def create_app() -> FastAPI:
                 )
                 request.scope["headers"] = headers
         response = await call_next(request)
+        direct_web_hostname = _trusted_direct_web_hostname(request)
+        content_type = str(response.headers.get("content-type") or "").lower()
+        if direct_web_hostname and response.status_code < 400 and "text/html" in content_type:
+            direct_web_cookie = _direct_web_cookie_value(direct_web_hostname)
+            if direct_web_cookie:
+                response.set_cookie(
+                    key=_DIRECT_WEB_COOKIE_NAME,
+                    value=direct_web_cookie,
+                    path="/",
+                    httponly=True,
+                    secure=forwarded_proto == "https",
+                    samesite="strict",
+                )
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "no-referrer")

@@ -8,7 +8,9 @@ import base64
 from services.config import config
 from services.protocol import openai_v1_chat_complete, openai_v1_response
 from services.protocol.chat_completion_cache import cache_key, chat_completion_cache
+from services.protocol import conversation
 from services.protocol.conversation import iter_conversation_payloads, sanitize_output_text
+from utils.helper import UpstreamHTTPError
 from utils.helper import extract_image_from_message_content
 
 
@@ -98,6 +100,40 @@ class ChatCompletionCacheTests(unittest.TestCase):
             openai_v1_chat_complete.handle(body)
 
         self.assertEqual(captured_efforts, ["extended"])
+
+    def test_expired_text_token_is_removed_and_next_account_is_used(self) -> None:
+        class FakeBackend:
+            def __init__(self, access_token: str):
+                self.access_token = access_token
+
+            def close(self) -> None:
+                return None
+
+        def fake_events(backend, **_kwargs):
+            if backend.access_token == "expired-token":
+                raise UpstreamHTTPError(
+                    "chat_requirements_prepare",
+                    401,
+                    {"error": {"code": "token_expired", "message": "authentication token is expired"}},
+                )
+            yield {"type": "conversation.delta", "delta": "OK"}
+
+        with (
+            mock.patch("services.protocol.conversation.OpenAIBackendAPI", side_effect=FakeBackend),
+            mock.patch("services.protocol.conversation.conversation_events", side_effect=fake_events),
+            mock.patch.object(conversation.account_service, "refresh_access_token", return_value="expired-token"),
+            mock.patch.object(conversation.account_service, "remove_invalid_token") as remove_invalid,
+            mock.patch.object(conversation.account_service, "get_text_access_token", return_value="healthy-token"),
+            mock.patch.object(conversation.account_service, "mark_text_used") as mark_used,
+        ):
+            result = "".join(conversation.stream_text_deltas(
+                FakeBackend("expired-token"),
+                conversation.ConversationRequest(model="auto", prompt="reply ok"),
+            ))
+
+        self.assertEqual(result, "OK")
+        remove_invalid.assert_called_once_with("expired-token", "text_stream")
+        mark_used.assert_called_once_with("healthy-token")
 
     def test_responses_reasoning_effort_reaches_conversation_request(self) -> None:
         captured_efforts: list[str] = []

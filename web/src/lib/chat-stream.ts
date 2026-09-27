@@ -1,6 +1,6 @@
 import webConfig from "@/constants/common-env";
 import {
-  chatErrorMessage,
+  chatHttpErrorMessage,
   parseChatStreamData,
   splitSseEvents,
 } from "@/lib/chat-sse";
@@ -26,17 +26,15 @@ function eventData(event: string) {
 }
 
 async function responseError(response: Response) {
-  const fallback = `请求失败 (${response.status})`;
   try {
     const text = await response.text();
-    if (!text) return fallback;
-    try {
-      return chatErrorMessage(JSON.parse(text)) || text || fallback;
-    } catch {
-      return text;
-    }
+    return chatHttpErrorMessage(
+      response.status,
+      response.headers.get("content-type") || "",
+      text,
+    );
   } catch {
-    return fallback;
+    return `请求失败 (${response.status})`;
   }
 }
 

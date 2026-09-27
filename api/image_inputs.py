@@ -16,6 +16,7 @@ from fastapi import HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
+from services.image_storage_service import ImageStorageError, image_storage_service
 from services.proxy_service import proxy_settings
 
 ImageInput = tuple[bytes, str, str]
@@ -27,6 +28,42 @@ IMAGE_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 IMAGE_REFERENCE_FIELDS = {"image", "image[]", "images", "images[]", "image_url", "image_url[]"}
 MASK_REFERENCE_FIELDS = {"mask", "mask[]"}
 _REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+
+
+def persist_task_reference_images(
+    images: list[ImageInput],
+    base_url: str,
+    *,
+    existing_first_path: str = "",
+) -> tuple[list[str], list[str]]:
+    """Persist task inputs for later authenticated previews and retries.
+
+    Storage is best-effort so a temporary storage failure does not change the
+    existing upstream edit contract. Reuse a caller-owned first path when one
+    is already available instead of writing a duplicate copy.
+    """
+
+    paths: list[str] = []
+    names: list[str] = []
+    existing = _clean(existing_first_path)
+    for index, image in enumerate(images):
+        image_data, filename, _content_type = image
+        stored_path = existing if index == 0 and existing else ""
+        if not stored_path:
+            suffix = PurePosixPath(filename).suffix.lower().lstrip(".") or "png"
+            try:
+                stored_path = image_storage_service.save(
+                    image_data,
+                    base_url,
+                    suffix,
+                ).rel
+            except ImageStorageError:
+                continue
+        if stored_path in paths:
+            continue
+        paths.append(stored_path)
+        names.append(PurePosixPath(filename).name or f"reference-{index + 1}.png")
+    return paths, names
 
 
 def _clean(value: object, default: str = "") -> str:

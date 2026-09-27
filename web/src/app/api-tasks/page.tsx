@@ -204,10 +204,10 @@ export default function ApiTasksPage() {
   ];
 
   return (
-    <main className="min-h-screen bg-stone-50 px-3 py-5 text-stone-950 sm:px-6 lg:px-8 dark:bg-stone-950 dark:text-white">
-      <div className="mx-auto max-w-[1500px] space-y-5">
-        <header className="overflow-hidden rounded-3xl border border-stone-200 bg-white shadow-sm dark:border-white/10 dark:bg-stone-900">
-          <div className="grid gap-6 px-5 py-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end lg:px-7">
+    <main className="min-h-screen min-w-0 bg-stone-50 px-0 py-3 text-stone-950 sm:px-6 sm:py-5 lg:px-8 dark:bg-stone-950 dark:text-white">
+      <div className="mx-auto max-w-[1500px] space-y-4 sm:space-y-5">
+        <header className="overflow-hidden rounded-xl border border-stone-200 bg-white shadow-sm sm:rounded-2xl dark:border-white/10 dark:bg-stone-900">
+          <div className="grid gap-4 px-4 py-5 sm:px-5 sm:py-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end lg:px-7">
             <div>
               <div className="flex items-center gap-2 text-xs font-bold tracking-[0.16em] text-stone-500 uppercase">
                 <Sparkles className="size-3.5" />
@@ -221,10 +221,10 @@ export default function ApiTasksPage() {
                 页面每 3 秒自动更新。
               </p>
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
               <Button
                 variant="outline"
-                className="h-10 rounded-xl border-stone-200 bg-white dark:border-white/10 dark:bg-stone-900"
+                className="h-11 w-full rounded-xl border-stone-200 bg-white sm:h-10 sm:w-auto dark:border-white/10 dark:bg-stone-900"
                 asChild
               >
                 <Link href="/queue">
@@ -234,7 +234,7 @@ export default function ApiTasksPage() {
               </Button>
               <Button
                 variant="outline"
-                className="h-10 rounded-xl border-stone-200 bg-white dark:border-white/10 dark:bg-stone-900"
+                className="h-11 w-full rounded-xl border-stone-200 bg-white sm:h-10 sm:w-auto dark:border-white/10 dark:bg-stone-900"
                 asChild
               >
                 <Link href="/image-manager">
@@ -244,7 +244,7 @@ export default function ApiTasksPage() {
               </Button>
               <Button
                 type="button"
-                className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800 dark:bg-white dark:text-stone-950 dark:hover:bg-stone-200"
+                className="col-span-2 h-11 w-full rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800 sm:h-10 sm:w-auto dark:bg-white dark:text-stone-950 dark:hover:bg-stone-200"
                 onClick={() => void load(true)}
                 disabled={refreshing}
               >
@@ -280,18 +280,18 @@ export default function ApiTasksPage() {
         </header>
 
         <section
-          className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"
+          className="grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-4"
           aria-label="任务统计"
         >
           {summaryCards.map(({ label, value, helper, icon: Icon, tone }) => (
             <article
               key={label}
-              className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-white/10 dark:bg-stone-900"
+              className="rounded-xl border border-stone-200 bg-white p-3 sm:rounded-2xl sm:p-4 dark:border-white/10 dark:bg-stone-900"
             >
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <p className="text-xs font-medium text-stone-500">{label}</p>
-                  <p className="mt-1 text-2xl font-black tracking-tight">
+                  <p className="mt-1 text-xl font-black tracking-tight sm:text-2xl">
                     {value}
                   </p>
                   <p className="mt-1 text-xs text-stone-400">{helper}</p>
@@ -306,7 +306,7 @@ export default function ApiTasksPage() {
           ))}
         </section>
 
-        <section className="rounded-3xl border border-stone-200 bg-white p-4 shadow-sm sm:p-5 dark:border-white/10 dark:bg-stone-900">
+        <section className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm sm:rounded-2xl sm:p-5 dark:border-white/10 dark:bg-stone-900">
           <div className="mb-4 flex items-center gap-2">
             <SlidersHorizontal className="size-4 text-stone-400" />
             <h2 className="text-sm font-bold">筛选任务</h2>
@@ -466,7 +466,7 @@ export default function ApiTasksPage() {
 
           {total > 0 ? (
             <nav
-              className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-stone-200 bg-white p-3 dark:border-white/10 dark:bg-stone-900"
+              className="mt-4 flex flex-col items-stretch justify-between gap-3 rounded-xl border border-stone-200 bg-white p-3 sm:flex-row sm:items-center sm:rounded-2xl dark:border-white/10 dark:bg-stone-900"
               aria-label="任务分页"
             >
               <p className="text-xs text-stone-500">

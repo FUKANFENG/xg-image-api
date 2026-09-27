@@ -32,7 +32,7 @@ function DialogOverlay({
     <DialogPrimitive.Overlay
       data-slot="dialog-overlay"
       className={cn(
-        "data-[state=open]:animate-in data-[state=closed]:animate-out fixed inset-0 z-50 bg-black/30 backdrop-blur-[2px]",
+        "data-[state=open]:animate-in data-[state=closed]:animate-out fixed inset-0 z-50 bg-black/45 backdrop-blur-[3px]",
         className,
       )}
       {...props}
@@ -54,14 +54,14 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out fixed top-[50%] left-[50%] z-50 grid w-[min(92vw,560px)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-[28px] border border-white/80 p-6 shadow-[0_36px_120px_-45px_rgba(16,24,40,0.4)] duration-200",
+          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out fixed inset-x-2 bottom-[calc(0.5rem+env(safe-area-inset-bottom))] z-50 grid max-h-[calc(100dvh-1rem-env(safe-area-inset-bottom))] w-auto gap-3 overflow-y-auto rounded-2xl border border-stone-200/80 p-4 shadow-[0_24px_80px_-30px_rgba(16,24,40,0.48)] duration-200 sm:top-[50%] sm:bottom-auto sm:left-[50%] sm:w-[min(92vw,560px)] sm:translate-x-[-50%] sm:translate-y-[-50%] sm:gap-4 sm:rounded-[24px] sm:p-6 dark:border-white/10",
           className,
         )}
         {...props}
       >
         {children}
         {showCloseButton ? (
-          <DialogPrimitive.Close className="ring-offset-background focus:ring-ring data-[state=open]:bg-accent data-[state=open]:text-muted-foreground absolute top-4 right-4 rounded-full p-1 opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:outline-none disabled:pointer-events-none">
+          <DialogPrimitive.Close className="ring-offset-background focus:ring-ring data-[state=open]:bg-accent data-[state=open]:text-muted-foreground absolute top-2 right-2 grid size-11 place-items-center rounded-full opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:outline-none disabled:pointer-events-none sm:top-4 sm:right-4 sm:size-9">
             <X className="size-4" />
             <span className="sr-only">Close</span>
           </DialogPrimitive.Close>

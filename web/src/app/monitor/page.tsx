@@ -225,7 +225,7 @@ function MonitorContent() {
   );
 
   return (
-    <section className="mx-auto w-full max-w-[1500px] space-y-6">
+    <section className="mx-auto w-full min-w-0 max-w-[1500px] space-y-4 py-3 sm:space-y-6 sm:py-0">
       <header className="flex flex-col gap-4 border-b border-stone-200 pb-5 dark:border-white/10 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
@@ -310,9 +310,9 @@ function MonitorContent() {
             />
           </div>
 
-          <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,.65fr)]">
-            <section className="rounded-2xl border border-stone-200 bg-white p-5 dark:border-white/10 dark:bg-stone-950">
-              <div className="flex items-center justify-between gap-3">
+          <div className="grid min-w-0 grid-cols-1 gap-4 sm:gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,.65fr)]">
+            <section className="min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-white p-4 sm:rounded-2xl sm:p-5 dark:border-white/10 dark:bg-stone-950">
+              <div className="flex flex-col items-start justify-between gap-2 sm:flex-row sm:items-center sm:gap-3">
                 <div>
                   <div className="flex items-center gap-2">
                     <BarChart3 className="size-4 text-violet-600" />
@@ -333,7 +333,7 @@ function MonitorContent() {
                 </span>
               </div>
               <div
-                className="mt-6 flex h-48 items-end gap-2 border-b border-stone-200 px-1 dark:border-white/10"
+                className="mt-5 flex h-48 min-w-0 items-end gap-1 overflow-hidden border-b border-stone-200 px-1 sm:mt-6 sm:gap-2 dark:border-white/10"
                 role="img"
                 aria-label="近十四日任务量柱状图"
               >
@@ -372,7 +372,7 @@ function MonitorContent() {
                 ) : null}
               </div>
             </section>
-            <section className="rounded-2xl border border-stone-200 bg-white p-5 dark:border-white/10 dark:bg-stone-950">
+            <section className="min-w-0 rounded-xl border border-stone-200 bg-white p-4 sm:rounded-2xl sm:p-5 dark:border-white/10 dark:bg-stone-950">
               <h2 className="text-sm font-semibold text-stone-950 dark:text-white">
                 功能使用分布
               </h2>
@@ -409,7 +409,7 @@ function MonitorContent() {
             </section>
           </div>
 
-          <section className="overflow-hidden rounded-2xl border border-stone-200 bg-white dark:border-white/10 dark:bg-stone-950">
+          <section className="min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-white sm:rounded-2xl dark:border-white/10 dark:bg-stone-950">
             <div className="flex items-center justify-between border-b border-stone-200 px-5 py-4 dark:border-white/10">
               <div>
                 <h2 className="text-sm font-semibold text-stone-950 dark:text-white">
@@ -476,8 +476,8 @@ function MonitorContent() {
             </div>
           </section>
 
-          <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-            <section className="min-w-0 border border-stone-200 bg-white dark:border-white/10 dark:bg-stone-950">
+          <div className="grid min-w-0 grid-cols-1 gap-4 sm:gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <section className="min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-white sm:rounded-2xl dark:border-white/10 dark:bg-stone-950">
               <div className="flex items-center justify-between border-b border-stone-200 px-4 py-3 dark:border-white/10">
                 <div>
                   <h2 className="text-sm font-semibold text-stone-950 dark:text-white">

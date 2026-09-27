@@ -270,21 +270,29 @@ class ImageTasksApiTests(unittest.TestCase):
 
     def test_create_edit_task_accepts_multiple_images(self):
         """测试图片编辑任务接口支持多个上传图片。"""
-        response = self.client.post(
-            "/api/image-tasks/edits",
-            headers=AUTH_HEADERS,
-            data={"client_task_id": "edit-1", "prompt": "edit", "model": "gpt-image-2"},
-            files=[
-                ("image", ("one.png", b"one", "image/png")),
-                ("image", ("two.png", b"two", "image/png")),
-            ],
-        )
+        with mock.patch.object(
+            image_tasks_module,
+            "persist_task_reference_images",
+            return_value=(["stored/one.png", "stored/two.png"], ["one.png", "two.png"]),
+        ):
+            response = self.client.post(
+                "/api/image-tasks/edits",
+                headers=AUTH_HEADERS,
+                data={"client_task_id": "edit-1", "prompt": "edit", "model": "gpt-image-2"},
+                files=[
+                    ("image", ("one.png", b"one", "image/png")),
+                    ("image", ("two.png", b"two", "image/png")),
+                ],
+            )
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["id"], "edit-1")
         self.assertEqual(len(self.fake_service.edit_calls), 1)
         images = self.fake_service.edit_calls[0][1]["images"]
         self.assertEqual(len(images), 2)
+        workflow = self.fake_service.edit_calls[0][1]["workflow"]
+        self.assertEqual(workflow["source_paths"], ["stored/one.png", "stored/two.png"])
+        self.assertEqual(workflow["source_names"], ["one.png", "two.png"])
 
     def test_normal_user_can_create_edit_task(self):
         """普通用户会话可提交图片二创，且身份原样传入额度隔离链路。"""
