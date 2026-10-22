@@ -1,11 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import Link from "next/link";
 import { ChevronDown, FileArchive, FileText, KeyRound, ListChecks, type LucideIcon } from "lucide-react";
 
 import { Card, CardContent } from "@/components/ui/card";
-import webConfig from "@/constants/common-env";
-import { getStoredAuthSession } from "@/store/auth";
+import { XG_PUBLIC_BASE_URL } from "@/lib/public-api-guide";
 
 type ParamRow = [string, string, string];
 
@@ -246,20 +245,9 @@ function ParamTable({ rows }: { rows: ParamRow[] }) {
 }
 
 export function ApiDocsCard() {
-  const [authKey, setAuthKey] = useState("");
-  const serviceBaseUrl = webConfig.apiUrl.replace(/\/$/, "") || (typeof window !== "undefined" ? window.location.origin : "");
+  const serviceBaseUrl = XG_PUBLIC_BASE_URL;
   const openAIBaseUrl = `${serviceBaseUrl}/v1`;
-  const displayKey = authKey || "<当前密钥>";
-
-  useEffect(() => {
-    let active = true;
-    void getStoredAuthSession().then((session) => {
-      if (active) setAuthKey(session?.key || "");
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
+  const displayKey = "<XG_API_KEY>";
 
   return (
     <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
@@ -270,8 +258,9 @@ export function ApiDocsCard() {
             接口接入说明
           </div>
           <p className="mt-1 text-xs leading-6 text-stone-500">
-            第三方应用按 OpenAI 兼容接口接入；文件任务接口也使用同一套鉴权方式。
+            以下为公网 OpenAI 兼容接口。公网生图建议使用异步任务，避免长请求超时；文档不会自动填入你的真实密钥。
           </p>
+          <Link href="/developers/" className="mt-2 inline-block text-sm font-medium text-violet-700 underline">查看 Cloudflare 公网生图与 Agent 开发文档 →</Link>
         </div>
 
         <div className="grid gap-3 md:grid-cols-2">

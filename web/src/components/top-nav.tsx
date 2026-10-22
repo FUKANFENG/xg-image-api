@@ -63,6 +63,7 @@ const primaryAdminNavItems: AdminNavItem[] = [
   { href: "/image", label: "生图测试" },
   { href: "/chat", label: "网页对话" },
   { href: "/api-tasks", label: "生图任务" },
+  { href: "/developers", label: "开发文档" },
   { href: "/settings?tab=api-docs", activeHref: "/settings", label: "API 接入" },
   { href: "/accounts", label: "账号池" },
   { href: "/monitor", label: "运行状态" },
@@ -313,8 +314,20 @@ export function TopNav() {
                 </span>
                 XG生图
               </Link>
+              <Link
+                href="/developers"
+                aria-current={isRouteActive(pathname, "/developers") ? "page" : undefined}
+                className={cn(
+                  "ml-auto inline-flex min-h-11 shrink-0 items-center justify-center whitespace-nowrap rounded-xl px-2 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 xl:hidden",
+                  isRouteActive(pathname, "/developers")
+                    ? "bg-violet-50 text-violet-800 dark:bg-violet-400/15 dark:text-violet-100"
+                    : "text-stone-600 hover:bg-stone-100 hover:text-stone-950 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-white",
+                )}
+              >
+                开发文档
+              </Link>
               <HeaderActions
-                className="ml-auto xl:hidden"
+                className="xl:hidden"
                 showGithub={false}
                 showVersion={false}
               />

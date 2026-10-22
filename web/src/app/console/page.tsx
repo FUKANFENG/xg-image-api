@@ -6,7 +6,6 @@ import {
   ArrowRight,
   CheckCircle2,
   CircleAlert,
-  Clipboard,
   Code2,
   ImageIcon,
   KeyRound,
@@ -16,11 +15,10 @@ import {
   UsersRound,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import webConfig from "@/constants/common-env";
+import { PublicApiGuide } from "@/components/public-api-guide";
 import {
   fetchAccounts,
   fetchImageRuntimeMetrics,
@@ -52,34 +50,6 @@ const initialSnapshot: ConsoleSnapshot = {
   models: [],
 };
 
-const coreEndpoints = [
-  {
-    method: "GET",
-    path: "/v1/models",
-    purpose: "读取当前可用模型",
-  },
-  {
-    method: "POST",
-    path: "/v1/images/generations",
-    purpose: "文本生成图片",
-  },
-  {
-    method: "POST",
-    path: "/v1/images/edits",
-    purpose: "图片编辑与重绘",
-  },
-  {
-    method: "POST",
-    path: "/v1/chat/completions",
-    purpose: "OpenAI 兼容对话",
-  },
-  {
-    method: "POST",
-    path: "/v1/responses",
-    purpose: "Responses 兼容接口",
-  },
-];
-
 const quickActions = [
   {
     href: "/image",
@@ -88,9 +58,9 @@ const quickActions = [
     icon: ImageIcon,
   },
   {
-    href: "/settings?tab=api-docs",
+    href: "/developers/",
     title: "API 接入",
-    description: "查看地址、鉴权方式和可直接复制的请求示例。",
+    description: "公网开发文档、Agent 接入说明与示例客户端。",
     icon: KeyRound,
   },
   {
@@ -153,13 +123,6 @@ function ConsoleContent() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
-  const [baseUrl] = useState(() =>
-    (
-      webConfig.apiUrl ||
-      (typeof window !== "undefined" ? window.location.origin : "")
-    ).replace(/\/$/, ""),
-  );
-
   const load = useCallback(async (manual = false) => {
     if (manual) setRefreshing(true);
     try {
@@ -213,15 +176,6 @@ function ConsoleContent() {
     return () => window.clearTimeout(timer);
   }, [load]);
 
-  const copyText = useCallback(async (value: string, label: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      toast.success(`${label}已复制`);
-    } catch {
-      toast.error("复制失败，请手动选择文本");
-    }
-  }, []);
-
   const normalAccounts = useMemo(
     () => snapshot.accounts.filter((account) => account.status === "正常").length,
     [snapshot.accounts],
@@ -241,12 +195,6 @@ function ConsoleContent() {
     )?.id ||
     snapshot.models[0]?.id ||
     "--";
-  const openAIBaseUrl = baseUrl ? `${baseUrl}/v1` : "";
-  const curlExample = `curl "${baseUrl || "http://127.0.0.1:8000"}/v1/images/generations" \\
-  -H "Authorization: Bearer $XG_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model":"gpt-image-2","prompt":"一只纸雕风格的白鹤","n":1,"response_format":"b64_json"}'`;
-
   if (loading) {
     return (
       <div className="grid min-h-[50vh] place-items-center">
@@ -271,8 +219,8 @@ function ConsoleContent() {
               工作流 API 控制台
             </h1>
             <p className="mt-3 max-w-2xl text-sm leading-7 text-stone-300 sm:text-base">
-              网页只保留接入、测试和运维入口。日常调用直接使用 OpenAI
-              兼容接口，复杂功能收纳在“更多”中，不影响原有能力与数据。
+              通过 Cloudflare 公网接口，把 XG 生图接入你的 Agent 和工作流。
+              这里提供开发文档、可复制示例和运行状态；无需把本机地址交给调用方。
             </p>
           </div>
           <Button
@@ -329,113 +277,7 @@ function ConsoleContent() {
         />
       </div>
 
-      <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
-        <article className="min-w-0 max-w-full rounded-2xl border border-stone-200/80 bg-white/80 p-5 shadow-sm sm:p-6 dark:border-white/10 dark:bg-stone-950/65">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <h2 className="text-lg font-semibold tracking-tight text-stone-950 dark:text-white">
-                工作流接入地址
-              </h2>
-              <p className="mt-1 text-sm leading-6 text-stone-500 dark:text-stone-400">
-                兼容 OpenAI SDK；鉴权使用 Bearer API Key。
-              </p>
-            </div>
-            <Link
-              href="/settings?tab=api-docs"
-              className="inline-flex items-center gap-1 text-sm font-medium text-violet-700 hover:text-violet-900 dark:text-violet-300 dark:hover:text-violet-100"
-            >
-              完整文档
-              <ArrowRight className="size-4" />
-            </Link>
-          </div>
-
-          <div className="mt-5 space-y-3">
-            {[
-              { label: "服务地址", value: baseUrl },
-              { label: "OpenAI Base URL", value: openAIBaseUrl },
-            ].map((item) => (
-              <div
-                key={item.label}
-                className="flex min-w-0 flex-col gap-2 rounded-xl border border-stone-200 bg-stone-50/80 px-4 py-3 sm:flex-row sm:items-center sm:justify-between dark:border-white/10 dark:bg-white/5"
-              >
-                <div className="min-w-0">
-                  <div className="text-[11px] font-semibold tracking-wide text-stone-400 uppercase">
-                    {item.label}
-                  </div>
-                  <code className="mt-1 block truncate text-sm text-stone-800 dark:text-stone-200">
-                    {item.value || "正在读取…"}
-                  </code>
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="self-end rounded-lg sm:self-auto"
-                  disabled={!item.value}
-                  onClick={() => void copyText(item.value, item.label)}
-                >
-                  <Clipboard className="size-4" />
-                  <span className="sr-only">复制{item.label}</span>
-                </Button>
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-5 min-w-0 max-w-full overflow-hidden rounded-xl bg-stone-950 text-stone-100">
-            <div className="flex items-center justify-between border-b border-white/10 px-4 py-2.5">
-              <span className="text-xs font-medium text-stone-400">
-                最小生图请求
-              </span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-7 rounded-lg text-stone-300 hover:bg-white/10 hover:text-white"
-                onClick={() => void copyText(curlExample, "请求示例")}
-              >
-                <Clipboard className="size-3.5" />
-                复制
-              </Button>
-            </div>
-            <pre className="max-w-full overflow-x-auto p-4 text-xs leading-6 text-stone-300">
-              <code>{curlExample}</code>
-            </pre>
-          </div>
-        </article>
-
-        <article className="min-w-0 max-w-full rounded-2xl border border-stone-200/80 bg-white/80 p-5 shadow-sm sm:p-6 dark:border-white/10 dark:bg-stone-950/65">
-          <h2 className="text-lg font-semibold tracking-tight text-stone-950 dark:text-white">
-            核心接口
-          </h2>
-          <p className="mt-1 text-sm leading-6 text-stone-500 dark:text-stone-400">
-            工作流通常只需要下面五个端点。
-          </p>
-          <div className="mt-4 divide-y divide-stone-200 dark:divide-white/10">
-            {coreEndpoints.map((endpoint) => (
-              <div key={endpoint.path} className="py-3 first:pt-0 last:pb-0">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span
-                    className={cn(
-                      "w-11 shrink-0 rounded-md px-1.5 py-1 text-center font-mono text-[10px] font-semibold",
-                      endpoint.method === "GET"
-                        ? "bg-sky-50 text-sky-700 dark:bg-sky-400/10 dark:text-sky-300"
-                        : "bg-violet-50 text-violet-700 dark:bg-violet-400/10 dark:text-violet-300",
-                    )}
-                  >
-                    {endpoint.method}
-                  </span>
-                  <code className="min-w-0 truncate text-xs text-stone-800 dark:text-stone-200">
-                    {endpoint.path}
-                  </code>
-                </div>
-                <p className="mt-1.5 pl-[52px] text-xs text-stone-500 dark:text-stone-400">
-                  {endpoint.purpose}
-                </p>
-              </div>
-            ))}
-          </div>
-        </article>
-      </div>
+      <PublicApiGuide />
 
       <div>
         <div className="mb-3 flex items-end justify-between gap-3">

@@ -19,7 +19,14 @@ docker-compose-local.yml
 
 # Environment variables
 .env
-.env.local
+.env.*
+!.env.example
+
+# Private credentials and certificates must never enter a public source release.
+*.pem
+*.key
+*.pfx
+*.p12
 
 # Database files
 *.db

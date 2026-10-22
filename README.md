@@ -7,6 +7,10 @@
 
 工作流接入可直接使用零第三方依赖的 [`sdk/XGAPIClient`](./sdk/xg_api_client.py)。快速说明见 [`docs/API_WORKFLOW.md`](./docs/API_WORKFLOW.md)；只走 ChatGPT Web、包含文字/看图对话、文生图、参考图编辑、流式响应和完整请求示例的开发文档见 [`docs/WEB_API_REFERENCE.md`](./docs/WEB_API_REFERENCE.md)，也可导入 [`docs/openapi-web-api.yaml`](./docs/openapi-web-api.yaml)。
 
+公网 Agent 接入文档位于网页导航的 **开发文档**（`/developers/`），同时提供 [Markdown](./web/public/docs/xg-public-api.md)、[OpenAPI](./web/public/docs/xg-public-api.openapi.json) 和 [Python 客户端](./web/public/docs/xg_image_client.py)。这些示例面向现有 `picture.museyin.com` 部署；自托管时请换成自己的域名，并自行创建 XG API Key。用户本地额度与并发上限配置见 [说明](./docs/USER_IMAGE_LIMITS.md)。
+
+本仓库提供可二次开发的源码，不包含 `.env`、本机配置、账号 Token、API Key、图片、日志或私人备份。部署前复制 `.env.example` 为 `.env` 并填写自己的配置；不要将运行数据提交到公开仓库。
+
 本机网页默认启用免登录模式：通过 `localhost` 或 `127.0.0.1` 打开后直接进入管理控制台。局域网部署还需显式启用 `CHATGPT2API_LAN_NO_LOGIN`，而且只对 RFC1918 私有地址上的同源浏览器请求生效。必须开放公网网页免登录时，在 `CHATGPT2API_PUBLIC_NO_LOGIN_HOSTS` 中逐个填写受控域名；该选项会把管理权限开放给所有能访问这些域名的人，不能使用通配符。普通 API 调用始终需要 Bearer Key；需要恢复网页登录时，将相应免登录开关或域名白名单清空。
 
 > [!WARNING]

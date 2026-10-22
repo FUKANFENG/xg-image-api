@@ -1,0 +1,618 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "XG Public Image Tasks API",
+    "version": "2026-10-14",
+    "description": "Cloudflare public deployment. Submit asynchronously, poll items, download with Bearer. Documentation: https://picture.museyin.com/docs/xg-public-api.md. This is XG, not the official OpenAI API. No real credentials are included."
+  },
+  "servers": [
+    {
+      "url": "https://picture.museyin.com",
+      "description": "Cloudflare public XG; do NOT append /v1 for task routes"
+    }
+  ],
+  "security": [
+    {
+      "XGApiKey": []
+    }
+  ],
+  "paths": {
+    "/v1/models": {
+      "get": {
+        "operationId": "listImageModels",
+        "summary": "Check available models",
+        "responses": {
+          "200": {
+            "description": "Model list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid Bearer key",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/image-tasks/generations": {
+      "post": {
+        "operationId": "submitImageGeneration",
+        "summary": "Submit one text-to-image task",
+        "description": "Returns a task, not the completed image. Async n=1, URL output. Reuse persisted client_task_id for transport retries.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted or previously existing task",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageTask"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid Bearer key",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "Not permitted; Cloudflare may return HTML",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "429": {
+            "description": "Queue full or insufficient quota; back off, do not change task ID",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/image-tasks/edits": {
+      "post": {
+        "operationId": "submitImageEdit",
+        "summary": "Submit an edit with one or more reference images",
+        "description": "Same task lifecycle as generations. Repeated multipart image[] fields or JSON images (HTTPS URLs/Data URLs). No arbitrary infinite-image guarantee.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/GenerationRequest"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "images"
+                    ],
+                    "properties": {
+                      "images": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                          "type": "string"
+                        },
+                        "description": "HTTPS URLs fetchable by XG or data:image/...;base64,...; no local paths/private URLs"
+                      },
+                      "mask": {
+                        "type": "string",
+                        "description": "Optional single mask matching first image dimensions"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "client_task_id",
+                  "prompt",
+                  "image[]"
+                ],
+                "properties": {
+                  "client_task_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Persisted unique business UUID. Same identity + same ID returns the existing task while retained; changing content requires a new ID."
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": "gpt-image-2",
+                    "description": "Use gpt-image-2 for the ChatGPT Web path. Do not use a codex image model."
+                  },
+                  "size": {
+                    "type": "string",
+                    "nullable": true,
+                    "example": "1024x1024",
+                    "description": "Requested size, not a guaranteed output size"
+                  },
+                  "quality": {
+                    "type": "string",
+                    "default": "auto"
+                  },
+                  "priority": {
+                    "type": "integer",
+                    "minimum": -10,
+                    "maximum": 10,
+                    "default": 0
+                  },
+                  "image[]": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    },
+                    "description": "Repeat this field for multiple reference files"
+                  },
+                  "mask": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Optional one PNG mask"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted or existing edit task",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageTask"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid Bearer key",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "Not permitted; Cloudflare may return HTML",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "413": {
+            "description": "Request body too large",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "429": {
+            "description": "Queue full or insufficient quota; back off, do not change task ID",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/image-tasks": {
+      "get": {
+        "operationId": "queryImageTasks",
+        "summary": "Poll tasks belonging to the calling identity",
+        "description": "There is no GET /api/image-tasks/{id}. Poll every 3–5 seconds until success/error. Stop and report paused. Missing IDs may mean wrong identity or expired records.",
+        "parameters": [
+          {
+            "name": "ids",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated client_task_id values. Omit to list recent tasks."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tasks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "items",
+                    "missing_ids"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ImageTask"
+                      }
+                    },
+                    "missing_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "has_more": {
+                      "type": "boolean"
+                    },
+                    "next_offset": {
+                      "type": "integer",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid Bearer key",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/image-tasks/{task_id}/cancel": {
+      "post": {
+        "operationId": "cancelImageTask",
+        "summary": "Cancel a pending task",
+        "description": "Cancelled tasks use status=error, error_code=cancelled_by_user. Terminal tasks return unchanged. Does not guarantee upstream computation can be undone.",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Use the original client_task_id, URL encoded"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task after cancellation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageTask"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid Bearer key",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/images/{image_path}": {
+      "get": {
+        "operationId": "downloadImage",
+        "summary": "Download an image with the same Bearer key",
+        "description": "Use data[].url from the successful task, resolve relative URL against server root. image_path may contain slashes; do not double-encode. Never send the XG key to other origins or through unverified redirects.",
+        "parameters": [
+          {
+            "name": "image_path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Remaining path under /images/, including subdirectories"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Image bytes; inspect Content-Type",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid Bearer key",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Image removed or not found",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "XGApiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A user-scoped XG API key provided by the administrator, not an upstream account access token"
+      }
+    },
+    "schemas": {
+      "GenerationRequest": {
+        "type": "object",
+        "required": [
+          "client_task_id",
+          "prompt"
+        ],
+        "properties": {
+          "client_task_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Persisted unique business UUID. Same identity + same ID returns the existing task while retained; changing content requires a new ID."
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "type": "string",
+            "default": "gpt-image-2",
+            "description": "Use gpt-image-2 for the ChatGPT Web path. Do not use a codex image model."
+          },
+          "size": {
+            "type": "string",
+            "nullable": true,
+            "example": "1024x1024",
+            "description": "Requested size, not a guaranteed output size"
+          },
+          "quality": {
+            "type": "string",
+            "default": "auto"
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": -10,
+            "maximum": 10,
+            "default": 0
+          }
+        }
+      },
+      "ImageTask": {
+        "type": "object",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "paused",
+              "success",
+              "error"
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "generate",
+              "edit"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "size": {
+            "type": "string",
+            "nullable": true
+          },
+          "quality": {
+            "type": "string"
+          },
+          "progress": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImageResult"
+            }
+          },
+          "error": {
+            "type": "string"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": "integer"
+          },
+          "remaining_image_quota": {
+            "type": "integer",
+            "description": "Optional local quota balance, not upstream provider quota"
+          },
+          "reference_images": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "ImageResult": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Usually relative /images/...; Bearer required"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "size_bytes": {
+            "type": "integer"
+          },
+          "revised_prompt": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

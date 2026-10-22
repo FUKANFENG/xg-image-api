@@ -2,6 +2,8 @@
 
 这个项目现在按 API-first 方式组织：工作流只依赖稳定的 OpenAI 兼容接口，网页主要用于生图联调、账号池和运行状态管理。原有高级能力仍然保留在后台“更多”菜单中。
 
+**通过 Cloudflare 公网接入本部署（picture.museyin.com）的 Agent，请优先阅读 [公网生图开发文档](../web/public/docs/xg-public-api.md)。** 公网长任务推荐 `/api/image-tasks/*` 异步协议；下方同步 SDK 示例主要用于本机/受控网络。在线文档为 `https://picture.museyin.com/developers/`，机器可读 Markdown、OpenAPI 和 Python 客户端统一位于 `web/public/docs/`，构建时会随前端发布，不含真实凭据。下面的本机地址不是远程调用地址。
+
 需要确保图片调用只走 ChatGPT Web、不消耗 Codex 生图额度，或需要文字对话、看图对话、参考图编辑、Mask、多图、Responses 和 SSE 的完整示例，请阅读 [`WEB_API_REFERENCE.md`](./WEB_API_REFERENCE.md)。Swagger、Postman 等工具可导入 [`openapi-web-api.yaml`](./openapi-web-api.yaml)。
 
 本机网页默认无需登录。推荐用 `.\scripts\start.ps1` 启动：无冲突时访问 `http://127.0.0.1:18080`，若端口被占用则使用脚本打印的实际地址。局域网网页免登录还必须显式启用 `CHATGPT2API_LAN_NO_LOGIN`，并且仅认可 RFC1918 私有地址的同源浏览器请求。公网网页必须免登录时，可用 `CHATGPT2API_PUBLIC_NO_LOGIN_HOSTS=picture.example.com` 精确放行受控域名；不要使用通配符，且应认识到这会公开管理权限。下列工作流 API 始终继续使用 Bearer API Key。
