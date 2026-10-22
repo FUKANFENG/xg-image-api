@@ -1801,8 +1801,18 @@ def _generate_single_image(
                 "event": "image_stream_fail",
                 "account_email": account_email,
                 "error": last_error,
+                "error_type": type(exc).__name__,
+                "upstream_status": getattr(exc, "status_code", None),
                 "index": index,
             })
+            if not codex_model and isinstance(exc, UpstreamHTTPError) and exc.status_code == 404:
+                error = ImageGenerationError(
+                    "网页生图上游返回 404：请求的模型或接口不可用，请管理员检查网页链路兼容性。",
+                    code="upstream_not_found",
+                    account_email=account_email,
+                )
+                setattr(error, "account_ref", account_ref)
+                raise error from exc
             if not emitted_for_token and is_token_invalid_error(last_error):
                 refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                 if refreshed_token and refreshed_token != token:

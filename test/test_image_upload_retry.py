@@ -68,6 +68,14 @@ class _Session:
         self.put_calls.append(url)
         return _Response()
 
+    def get(self, url: str, **_kwargs):
+        if "/backend-api/models?" not in url:
+            raise AssertionError(f"unexpected GET: {url}")
+        return _Response({
+            "default_model_slug": "gpt-test",
+            "models": [{"slug": "gpt-test", "enabled_tools": ["image_gen_tool_enabled"]}],
+        })
+
     def close(self) -> None:
         self.closed = True
 

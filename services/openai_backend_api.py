@@ -673,7 +673,34 @@ class OpenAIBackendAPI:
         if not base_model:
             return "auto"
         if base_model == "gpt-image-2":
-            return "gpt-5-3"
+            # The image alias is not itself a Web conversation model. Resolve it
+            # from this account's catalog: both retired slugs and "auto" can
+            # return Model not found. Pin the selection for prepare + submit.
+            cached = getattr(self, "_resolved_image_model_slug", "")
+            if cached:
+                return cached
+            path = "/backend-api/models"
+            response = self.session.get(
+                self.base_url + path + "?history_and_training_disabled=false",
+                headers=self._headers(path),
+                timeout=self._image_request_timeout(30),
+            )
+            ensure_ok(response, path)
+            catalog = response.json()
+            candidates = [
+                item["slug"]
+                for item in catalog.get("models", [])
+                if isinstance(item, dict)
+                and isinstance(item.get("slug"), str)
+                and item["slug"].startswith("gpt-")
+                and "image_gen_tool_enabled" in (item.get("enabled_tools") or [])
+            ]
+            if not candidates:
+                raise RuntimeError("当前账号未提供支持网页生图的模型，请检查账号的网页生图权限。")
+            default = catalog.get("default_model_slug")
+            selected = default if default in candidates else candidates[0]
+            self._resolved_image_model_slug = selected
+            return selected
         if base_model == CODEX_IMAGE_MODEL:
             return base_model
         return "auto"
