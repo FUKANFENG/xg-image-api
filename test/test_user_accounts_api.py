@@ -3,6 +3,9 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from fastapi import HTTPException
+from pydantic import ValidationError
+
 from api import accounts as accounts_api
 
 
@@ -12,6 +15,28 @@ def endpoint_for(path: str, method: str):
 
 
 class UserAccountsApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_admin_can_set_unlimited_quota_and_hard_concurrency_cap(self) -> None:
+        endpoint = endpoint_for("/api/auth/users/{key_id}", "POST")
+        body = accounts_api.UserAccountUpdateRequest(image_quota_unlimited=True, image_concurrency_limit=4)
+        with (
+            patch.object(accounts_api, "require_admin") as require_admin,
+            patch.object(accounts_api.auth_service, "update_user", return_value={}) as update_user,
+            patch.object(accounts_api.auth_service, "list_users", return_value=[]),
+        ):
+            await endpoint("test-user", body, authorization="Bearer test-admin")
+            require_admin.assert_called_once_with("Bearer test-admin")
+            update_user.assert_called_once_with("test-user", {"image_quota_unlimited": True, "image_concurrency_limit": 4})
+        with (
+            patch.object(accounts_api, "require_admin", side_effect=HTTPException(status_code=403)),
+            patch.object(accounts_api.auth_service, "update_user") as update_user,
+        ):
+            with self.assertRaises(HTTPException):
+                await endpoint("test-user", body, authorization="Bearer ordinary-user")
+            update_user.assert_not_called()
+        for limit in (-1, 17):
+            with self.assertRaises(ValidationError):
+                accounts_api.UserAccountUpdateRequest(image_concurrency_limit=limit)
+
     async def test_admin_creates_password_user_without_returning_a_key(self) -> None:
         endpoint = endpoint_for("/api/auth/users", "POST")
         created = {

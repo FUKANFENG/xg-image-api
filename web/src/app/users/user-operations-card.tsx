@@ -313,7 +313,7 @@ export function UserOperationsCard() {
                         {user.group || "default"}
                       </td>
                       <td className="px-3 py-3 text-right font-semibold tabular-nums">
-                        {user.image_quota}
+                        {user.image_quota_unlimited ? "不限额" : user.image_quota}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <button

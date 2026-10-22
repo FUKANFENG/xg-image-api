@@ -225,8 +225,9 @@ export function UserAccountsCard() {
                       </div>
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs leading-5 text-stone-500">
                         <span>账号 {item.username || "—"}</span>
-                        <span>剩余 {item.image_quota} 张</span>
-                        <span>已消耗 {item.image_quota_used} 张</span>
+                        <span>{item.image_quota_unlimited ? "本地额度不限" : `剩余 ${item.image_quota} 张`}</span>
+                        {!!item.image_concurrency_limit && <span>并发上限 {item.image_concurrency_limit}</span>}
+                        <span>已消耗计费额度 {item.image_quota_used} 张</span>
                         <span>最近登录 {formatDateTime(item.last_used_at)}</span>
                       </div>
                     </div>
@@ -284,7 +285,7 @@ export function UserAccountsCard() {
               <Input id="edit-user-username" autoComplete="off" value={editUsername} onChange={(event) => setEditUsername(event.target.value)} className="h-11 rounded-xl border-stone-200 bg-white" />
             </div>
             <div className="space-y-2">
-              <label htmlFor="edit-user-quota" className="text-sm font-medium text-stone-700">剩余额度（张）</label>
+              <label htmlFor="edit-user-quota" className="text-sm font-medium text-stone-700">{editingItem?.image_quota_unlimited ? "有限额度余额（不限额期间不扣除）" : "剩余额度（张）"}</label>
               <Input id="edit-user-quota" type="number" min="0" max="100000" inputMode="numeric" value={editQuota} onChange={(event) => setEditQuota(event.target.value)} className="h-11 rounded-xl border-stone-200 bg-white" />
             </div>
             <div className="space-y-2">

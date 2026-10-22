@@ -506,6 +506,7 @@ class ImageTaskService:
         self.edit_handler = edit_handler
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
         self.credit_manager = credit_manager or auth_service
+        self.owner_concurrency_getter = getattr(self.credit_manager, "get_image_concurrency_limit", lambda owner: 0)
         self.global_concurrency_getter = global_concurrency_getter or (lambda: config.image_global_concurrency)
         self.user_concurrency_getter = user_concurrency_getter or (lambda: config.image_user_concurrency)
         self.queue_capacity_getter = queue_capacity_getter or (lambda: config.image_queue_capacity)
@@ -632,19 +633,15 @@ class ImageTaskService:
         pending_by_owner[owner_id] = pending_by_owner.get(owner_id, 0) + task_count
         total_pending = sum(pending_by_owner.values())
         available_global = max(0, effective_global_limit - self._running_total)
-        if config.image_allow_user_borrowing:
-            dispatchable = min(available_global, total_pending)
-        else:
-            dispatchable = min(
-                available_global,
-                sum(
-                    min(
-                        queued,
-                        max(0, user_limit - self._running_by_owner.get(owner, 0)),
-                    )
-                    for owner, queued in pending_by_owner.items()
-                ),
-            )
+        shared_limit = effective_global_limit if config.image_allow_user_borrowing else user_limit
+        dispatchable = min(
+            available_global,
+            sum(
+                min(queued, max(0, self._owner_dispatch_limit(owner, shared_limit)
+                                - self._running_by_owner.get(owner, 0)))
+                for owner, queued in pending_by_owner.items()
+            ),
+        )
         return max(0, total_pending - dispatchable)
 
     @staticmethod
@@ -740,6 +737,12 @@ class ImageTaskService:
     def _remove_pending_work_locked(self, key: str) -> bool:
         return self._take_pending_work_locked(key) is not None
 
+    def _owner_dispatch_limit(self, owner_id: str, shared_limit: int) -> int:
+        # Read persisted policy: all keys, sessions, API children and restored tasks
+        # belonging to this user share the same hard cap, including borrowed slots.
+        hard_limit = self.owner_concurrency_getter(owner_id)
+        return min(shared_limit, hard_limit) if hard_limit > 0 else shared_limit
+
     def _next_owner_work_locked(self, owner_limit: int | None) -> _QueuedImageWork | None:
         if self._last_dispatched_owner and self._last_dispatched_owner in self._owner_cycle:
             owner_index = list(self._owner_cycle).index(self._last_dispatched_owner)
@@ -750,7 +753,8 @@ class ImageTaskService:
             if not buckets or not self._owner_has_pending(buckets):
                 self._pending_by_owner.pop(owner_id, None)
                 continue
-            if owner_limit is not None and self._running_by_owner.get(owner_id, 0) >= owner_limit:
+            effective_owner_limit = self._owner_dispatch_limit(owner_id, owner_limit or 16)
+            if self._running_by_owner.get(owner_id, 0) >= effective_owner_limit:
                 self._owner_cycle.append(owner_id)
                 continue
             work = self._pop_best_owner_work(buckets)
@@ -1220,9 +1224,10 @@ class ImageTaskService:
             }
             owner_dispatch_limit = (
                 effective_global_limit
-                if not contending_owners or contending_owners == {owner}
+                if config.image_allow_user_borrowing and (not contending_owners or contending_owners == {owner})
                 else user_limit
             )
+            owner_dispatch_limit = self._owner_dispatch_limit(owner, owner_dispatch_limit)
             global_waves_ahead = max(0, (running + queued) // effective_global_limit)
             owner_waves_ahead = max(0, (owner_running + owner_queued) // owner_dispatch_limit)
             waves_ahead = max(global_waves_ahead, owner_waves_ahead)

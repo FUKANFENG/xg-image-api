@@ -236,6 +236,8 @@ class AuthService:
             "password_hash": password_hash,
             "enabled": bool(raw.get("enabled", True)),
             "image_quota": self._nonnegative_int(raw.get("image_quota")),
+            "image_quota_unlimited": raw.get("image_quota_unlimited") is True,
+            "image_concurrency_limit": min(16, self._nonnegative_int(raw.get("image_concurrency_limit"))),
             "image_quota_used": self._nonnegative_int(raw.get("image_quota_used")),
             "image_credit_reservations": reservations,
             "image_credit_ledger": self._normalize_credit_ledger(raw.get("image_credit_ledger")),
@@ -269,6 +271,8 @@ class AuthService:
             "group": item.get("group") or ("default" if item.get("role") == "user" else "admin"),
             "enabled": bool(item.get("enabled", True)),
             "image_quota": cls._nonnegative_int(item.get("image_quota")),
+            "image_quota_unlimited": item.get("image_quota_unlimited") is True,
+            "image_concurrency_limit": cls._nonnegative_int(item.get("image_concurrency_limit")),
             "image_quota_used": cls._nonnegative_int(item.get("image_quota_used")),
             "password_configured": bool(cls._clean(item.get("password_hash"))),
             "legacy_key_enabled": bool(cls._clean(item.get("key_hash"))),
@@ -286,8 +290,11 @@ class AuthService:
             "session_version": cls._nonnegative_int(item.get("session_version"), default=1),
             "last_used_at": item.get("last_used_at"),
         }
-        if identity["role"] == "user" and cls._clean(item.get("password_hash")):
-            identity["image_quota"] = cls._nonnegative_int(item.get("image_quota"))
+        if identity["role"] == "user":
+            identity["image_quota_unlimited"] = item.get("image_quota_unlimited") is True
+            identity["image_concurrency_limit"] = cls._nonnegative_int(item.get("image_concurrency_limit"))
+            if cls._clean(item.get("password_hash")) and not identity["image_quota_unlimited"]:
+                identity["image_quota"] = cls._nonnegative_int(item.get("image_quota"))
         return identity
 
     def list_keys(self, role: AuthRole | None = None) -> list[dict[str, object]]:
@@ -520,6 +527,15 @@ class AuthService:
             if index is None:
                 return None
             next_item = dict(self._items[index])
+            if "image_quota_unlimited" in updates and updates["image_quota_unlimited"] is not None:
+                if not isinstance(updates["image_quota_unlimited"], bool):
+                    raise ValueError("不限额标记必须为布尔值")
+                next_item["image_quota_unlimited"] = updates["image_quota_unlimited"]
+            if "image_concurrency_limit" in updates and updates["image_concurrency_limit"] is not None:
+                limit = updates["image_concurrency_limit"]
+                if type(limit) is not int or not 0 <= limit <= 16:
+                    raise ValueError("用户生图并发上限必须为 0–16 的整数，0 表示沿用系统策略")
+                next_item["image_concurrency_limit"] = limit
             if "name" in updates and updates.get("name") is not None:
                 next_item["name"] = self._build_name_locked(
                     str(updates.get("name") or ""),
@@ -672,6 +688,15 @@ class AuthService:
         except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
             return None
 
+    def get_image_concurrency_limit(self, user_id: str) -> int:
+        """Return the persisted hard cap (0 inherits the shared scheduler policy)."""
+        with self._lock:
+            self._reload_locked()
+            index = self._find_item_index_locked(self._clean(user_id), role="user")
+            if index is None:
+                return 0
+            return self._nonnegative_int(self._items[index].get("image_concurrency_limit"))
+
     def get_image_quota(self, identity: dict[str, object]) -> int | None:
         if self._clean(identity.get("role")) != "user":
             return None
@@ -681,6 +706,8 @@ class AuthService:
             if index is None:
                 return None
             item = self._items[index]
+            if item.get("image_quota_unlimited") is True:
+                return None
             if not self._clean(item.get("password_hash")):
                 return None
             return self._nonnegative_int(item.get("image_quota"))
@@ -697,13 +724,13 @@ class AuthService:
             if index is None:
                 return None
             item = self._items[index]
-            if not self._clean(item.get("password_hash")):
-                return None
             if not bool(item.get("enabled", True)):
                 return False
             reservations = list(item.get("image_credit_reservations") or [])
             if normalized_task_id in reservations:
                 return True
+            if item.get("image_quota_unlimited") is True or not self._clean(item.get("password_hash")):
+                return None
             quota = self._nonnegative_int(item.get("image_quota"))
             if quota < 1:
                 return False

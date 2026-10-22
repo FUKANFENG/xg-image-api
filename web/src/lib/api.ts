@@ -957,6 +957,8 @@ export type LoginResponse = {
   subject_id: string;
   name: string;
   image_quota?: number;
+  image_quota_unlimited?: boolean;
+  image_concurrency_limit?: number;
 };
 
 export type AuthSessionResponse =
@@ -970,6 +972,8 @@ export type UserAccount = {
   role: "user";
   enabled: boolean;
   image_quota: number;
+  image_quota_unlimited?: boolean;
+  image_concurrency_limit?: number;
   group?: string;
   image_quota_used: number;
   password_configured: boolean;

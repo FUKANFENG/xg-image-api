@@ -47,6 +47,8 @@ class UserAccountCreateRequest(BaseModel):
 
 
 class UserAccountUpdateRequest(BaseModel):
+    image_quota_unlimited: bool | None = None
+    image_concurrency_limit: int | None = Field(default=None, ge=0, le=16)
     name: str | None = None
     username: str | None = Field(default=None, min_length=3, max_length=32)
     password: str | None = Field(default=None, min_length=8, max_length=128)
@@ -209,6 +211,8 @@ def create_router() -> APIRouter:
                 "password": body.password,
                 "enabled": body.enabled,
                 "image_quota": body.image_quota,
+                "image_quota_unlimited": body.image_quota_unlimited,
+                "image_concurrency_limit": body.image_concurrency_limit,
                 "group": body.group,
             }.items()
             if value is not None

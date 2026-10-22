@@ -73,6 +73,50 @@ class PasswordUserAccountTests(unittest.TestCase):
             self.assertIsNone(service.authenticate_session(token))
             self.assertIsNotNone(service.authenticate_password("designer.c", "new-safe-password-789"))
 
+    def test_unlimited_policy_persists_without_changing_credentials_or_balance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.make_service(directory)
+            account = service.create_user(username="unlimited", password="test-password", image_quota=1)
+            service.update_key(account["id"], {"key": "test-only-key"}, role="user")
+            identity = service.authenticate_key("test-only-key")
+            session = service.create_session(identity)
+            self.assertTrue(service.reserve_image_credit(identity, "already-reserved"))
+            service.update_user(account["id"], {"image_quota_unlimited": True, "image_concurrency_limit": 4})
+            service = self.make_service(directory)
+            self.assertEqual(service.get_image_concurrency_limit(account["id"]), 4)
+            self.assertIsNone(service.get_image_quota(identity))
+            for index in range(105):
+                self.assertIsNone(service.reserve_image_credit(identity, f"new-{index}"))
+            self.assertEqual(service.list_users()[0]["image_quota"], 0)
+            for fresh_identity in (service.authenticate_key("test-only-key"),
+                                   service.authenticate_password("unlimited", "test-password"),
+                                   service.authenticate_session(session)):
+                self.assertEqual(fresh_identity["role"], "user")
+                self.assertTrue(fresh_identity["image_quota_unlimited"])
+                self.assertNotIn("image_quota", fresh_identity)
+            # Existing reservations still settle exactly once after a policy change.
+            self.assertTrue(service.refund_image_credit(identity, "already-reserved"))
+            self.assertFalse(service.refund_image_credit(identity, "already-reserved"))
+            service.update_user(account["id"], {"image_quota_unlimited": False})
+            self.assertEqual(service.get_image_quota(identity), 1)
+            self.assertTrue(service.reserve_image_credit(identity, "finite"))
+            self.assertFalse(service.reserve_image_credit(identity, "exhausted"))
+            service.update_user(account["id"], {"image_quota_unlimited": True, "enabled": False})
+            self.assertFalse(service.reserve_image_credit(identity, "disabled"))
+            self.assertIsNone(service.authenticate_key("test-only-key"))
+
+    def test_invalid_policy_does_not_change_account(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.make_service(directory)
+            account = service.create_user(username="limited", password="test-password", image_quota=3)
+            for limit in (-1, 17, "4", True):
+                with self.assertRaises(ValueError):
+                    service.update_user(account["id"], {"image_concurrency_limit": limit})
+            with self.assertRaises(ValueError):
+                service.update_user(account["id"], {"image_quota_unlimited": "false"})
+            self.assertEqual(service.get_image_concurrency_limit(account["id"]), 0)
+            self.assertFalse(service.list_users()[0]["image_quota_unlimited"])
+
     def test_legacy_key_migration_requires_a_username_and_reserves_admin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             service = self.make_service(directory)

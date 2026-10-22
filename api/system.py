@@ -158,6 +158,9 @@ def _auth_response(identity: dict[str, object], app_version: str) -> dict[str, o
     }
     if identity.get("role") == "user" and identity.get("image_quota") is not None:
         payload["image_quota"] = identity.get("image_quota")
+    if identity.get("role") == "user":
+        payload["image_quota_unlimited"] = identity.get("image_quota_unlimited") is True
+        payload["image_concurrency_limit"] = identity.get("image_concurrency_limit", 0)
     return payload
 
 
